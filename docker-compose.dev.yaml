@@ -1,0 +1,62 @@
+version: "3.9"
+
+name: strava-auto-server-dev
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      # Ensure ARM64 on Raspberry Pi; harmless elsewhere
+      # platform: linux/arm64
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      # App basics
+      APP_ENV: "dev"
+      LOG_LEVEL: "INFO"
+      # DB (SQLite path inside container mapped to host ./data)
+      DATABASE_URL: "sqlite:////data/app.db"
+      # Strava OAuth
+      STRAVA_CLIENT_ID: "${STRAVA_CLIENT_ID}"
+      STRAVA_CLIENT_SECRET: "${STRAVA_CLIENT_SECRET}"
+      STRAVA_REDIRECT_URI: "${STRAVA_REDIRECT_URI}" # e.g. http://localhost:8000/api/auth/strava/callback
+      # Polling interval seconds (MVP)
+      POLLING_INTERVAL_SEC: "120"
+    volumes:
+      - ./api:/app           # source mount for hot reload
+      - ./data:/data         # SQLite persistence
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 20s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # platform: linux/arm64
+    command: npm run dev -- --host --port 5173
+    environment:
+      # Used by Vite proxy or your api client
+      VITE_API_BASE_URL: "http://api:8000"
+      # If you prefer a dev proxy in vite.config.ts, you can use /api → http://api:8000
+    volumes:
+      - ./frontend:/usr/src/app
+      - /usr/src/app/node_modules   # anonymous volume to avoid host node_modules conflicts
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5173"]  # minimal check
+      interval: 20s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+# No separate DB container; SQLite file is bind-mounted.
+# Add a reverse proxy if you later expose the Pi (e.g., Caddy) and want TLS.

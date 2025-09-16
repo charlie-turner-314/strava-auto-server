@@ -1,0 +1,10 @@
+node_modules
+.env
+htmlcov
+__pycache__
+/Users/charlieturner/Documents/proj/strava-auto-server/tests/__pycache__
+data/
+.coverage
+.venv/
+.env-run/
+dist/

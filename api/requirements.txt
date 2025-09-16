@@ -1,0 +1,19 @@
+# FastAPI & ASGI server
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Data / DB
+SQLAlchemy==2.0.35
+alembic==1.13.2
+
+# Validation
+pydantic==2.9.2
+
+# HTTP client for Strava API calls
+httpx==0.27.2
+
+# Scheduling (for polling jobs later)
+APScheduler==3.10.4
+
+# Multipart/form support (needed for FastAPI uploads and Strava auth)
+python-multipart==0.0.9
