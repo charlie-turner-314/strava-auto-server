@@ -40,6 +40,8 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         db._engine = None  # type: ignore[attr-defined]
         self.engine = db.get_engine()
         db.ensure_schema()
+        with self.engine.begin() as conn:
+            conn.execute(sql_text("DELETE FROM strava_request_log"))
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -180,6 +182,89 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         data = await client.get_athlete_activities(after=None)
         self.assertEqual(data, [])
         self.assertGreaterEqual(attempts["n"], 3)
+
+    async def test_activity_detail_request_logged(self):
+        client = StravaClient(self.engine)
+        now = int(time.time())
+        with self.engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                ),
+                {"e": now + 3600},
+            )
+
+        async def fake_get(url, headers=None, params=None, **kwargs):
+            return _FakeResp(
+                200,
+                {"id": 7},
+                {"X-RateLimit-Usage": "1,10", "X-RateLimit-Limit": "100,1000"},
+            )
+
+        client._http.get = fake_get  # type: ignore[method-assign]
+        data = await client.get_activity_detail(123)
+        self.assertEqual(data.get("id"), 7)
+        with self.engine.connect() as conn:
+            count = conn.execute(
+                sql_text("SELECT COUNT(*) FROM strava_request_log")
+            ).scalar_one()
+        self.assertEqual(count, 1)
+
+    async def test_activity_laps_request_logged(self):
+        client = StravaClient(self.engine)
+        now = int(time.time())
+        with self.engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                ),
+                {"e": now + 3600},
+            )
+
+        async def fake_get(url, headers=None, **kwargs):
+            return _FakeResp(
+                200,
+                [{"lap_index": 0}],
+                {"X-RateLimit-Usage": "1,10", "X-RateLimit-Limit": "100,1000"},
+            )
+
+        client._http.get = fake_get  # type: ignore[method-assign]
+        laps = await client.get_activity_laps(77)
+        self.assertEqual(len(laps), 1)
+        with self.engine.connect() as conn:
+            count = conn.execute(
+                sql_text("SELECT COUNT(*) FROM strava_request_log")
+            ).scalar_one()
+        self.assertEqual(count, 1)
+
+    async def test_epoch_fallback_logs_second_request(self):
+        client = StravaClient(self.engine)
+        now = int(time.time())
+        with self.engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                ),
+                {"e": now + 3600},
+            )
+
+        calls = {"n": 0}
+
+        async def fake_get(url, params=None, headers=None, **kwargs):
+            calls["n"] += 1
+            headers = {"X-RateLimit-Usage": "1,10", "X-RateLimit-Limit": "100,1000"}
+            if calls["n"] == 1:
+                return _FakeResp(200, [], headers)
+            return _FakeResp(200, [{"id": 1}], headers)
+
+        client._http.get = fake_get  # type: ignore[method-assign]
+        data = await client.get_athlete_activities(after=None)
+        self.assertEqual(len(data), 1)
+        with self.engine.connect() as conn:
+            count = conn.execute(
+                sql_text("SELECT COUNT(*) FROM strava_request_log")
+            ).scalar_one()
+        self.assertEqual(count, 2)
 
 
 if __name__ == "__main__":

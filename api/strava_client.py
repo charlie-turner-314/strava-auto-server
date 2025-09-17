@@ -286,6 +286,14 @@ class StravaClient:
                             params={"per_page": 100, "after": 0},
                             headers=headers,
                         )
+                        try:
+                            self._log_rate_limits(resp2)
+                        except Exception:
+                            pass
+                        try:
+                            _record_request(resp2, path="/athlete/activities?after=0")
+                        except Exception:
+                            pass
                         resp2.raise_for_status()
                         data2 = resp2.json()
                         if isinstance(data2, list):
@@ -504,6 +512,14 @@ class StravaClient:
         headers = {"Authorization": f"Bearer {token.access_token}"}
         url = f"https://www.strava.com/api/v3/activities/{int(activity_id)}"
         resp = await self._http.get(url, headers=headers, params={"include_all_efforts": "false"})
+        try:
+            self._log_rate_limits(resp)
+        except Exception:
+            pass
+        try:
+            _record_request(resp, path=f"/activities/{activity_id}?detail")
+        except Exception:
+            pass
         if resp.status_code >= 400:
             resp.raise_for_status()
         try:
@@ -519,6 +535,14 @@ class StravaClient:
         headers = {"Authorization": f"Bearer {token.access_token}"}
         url = f"https://www.strava.com/api/v3/activities/{int(activity_id)}/laps"
         resp = await self._http.get(url, headers=headers)
+        try:
+            self._log_rate_limits(resp)
+        except Exception:
+            pass
+        try:
+            _record_request(resp, path=f"/activities/{activity_id}/laps")
+        except Exception:
+            pass
         if resp.status_code >= 400:
             resp.raise_for_status()
         try:

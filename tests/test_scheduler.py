@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 import asyncio
+from datetime import datetime, timezone, timedelta
 
 from api import db  # type: ignore
 from sqlalchemy import text as sql_text
@@ -96,6 +97,38 @@ class TestSchedulerIngest(unittest.TestCase):
             assert len(s.get_jobs()) >= 1
             s.shutdown(wait=False)
         asyncio.run(run())
+
+    def test_compute_polling_profile_uses_elapsed_time(self):
+        now = datetime.now(timezone.utc) - timedelta(hours=1)
+        local_dt = now.astimezone()
+        start_local = local_dt.isoformat()
+        start_utc = now.isoformat()
+        with self.engine.begin() as conn:
+            conn.execute(sql_text("DELETE FROM activities"))
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO activities (id, start_date, start_date_local, elapsed_time, raw_json, updated_at)
+                    VALUES (:id, :sd, :sdl, :elapsed, :raw, :updated)
+                    """
+                ),
+                {
+                    "id": 1,
+                    "sd": start_utc,
+                    "sdl": start_local,
+                    "elapsed": 180,  # 3 minutes later
+                    "raw": "{}",
+                    "updated": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+        profile = scheduler._compute_polling_profile(self.engine, default_interval=300)
+        intervals = profile["intervals"]
+        self.assertEqual(len(intervals), 1440)
+        start_minute = local_dt.hour * 60 + local_dt.minute
+        end_minute = (start_minute + 3) % 1440
+        self.assertLess(intervals[end_minute], intervals[start_minute])
+        self.assertEqual(profile["total_samples"], 1)
 
 
 if __name__ == '__main__':

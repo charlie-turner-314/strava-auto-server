@@ -41,7 +41,7 @@ def _canonical_json(obj: Any) -> str:
 
 
 _MIN_POLL_INTERVAL = 60
-_MAX_POLL_INTERVAL = 600
+_MAX_POLL_INTERVAL = 6000
 _POLLING_PROFILE_KEY = "scheduler_polling_profile"
 
 
@@ -50,7 +50,7 @@ def _minute_of_day_from_epoch(epoch: float) -> int:
     return int(lt.tm_hour) * 60 + int(lt.tm_min)
 
 
-def _minute_of_day_from_str(value: Any) -> Optional[int]:
+def _minute_of_day_from_str(value: Any, *, offset_seconds: int = 0) -> Optional[int]:
     if not value:
         return None
     try:
@@ -58,6 +58,8 @@ def _minute_of_day_from_str(value: Any) -> Optional[int]:
         if "T" not in s:
             return None
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if offset_seconds:
+            dt = dt + timedelta(seconds=int(offset_seconds))
         return int(dt.hour) * 60 + int(dt.minute)
     except Exception:
         return None
@@ -101,11 +103,15 @@ def _load_polling_profile() -> Dict[str, Any]:
 def _save_polling_profile(profile: Dict[str, Any]) -> None:
     to_store = dict(profile)
     intervals = to_store.get("intervals") or {}
-    to_store["intervals"] = {str(k): int(v) for k, v in intervals.items() if isinstance(k, int)}
+    to_store["intervals"] = {
+        str(k): int(v) for k, v in intervals.items() if isinstance(k, int)
+    }
     set_setting(_POLLING_PROFILE_KEY, json.dumps(to_store))
 
 
-def _compute_polling_profile(engine: Engine, *, default_interval: int) -> Dict[str, Any]:
+def _compute_polling_profile(
+    engine: Engine, *, default_interval: int
+) -> Dict[str, Any]:
     """Build a per-minute polling interval map using the last 30 days of activities."""
 
     now = datetime.now(timezone.utc)
@@ -115,7 +121,7 @@ def _compute_polling_profile(engine: Engine, *, default_interval: int) -> Dict[s
 
     with engine.connect() as conn:
         rows = conn.execute(
-            sql_text("SELECT start_date, start_date_local FROM activities")
+            sql_text("SELECT start_date, start_date_local, elapsed_time FROM activities")
         ).fetchall()
 
     for row in rows:
@@ -129,9 +135,23 @@ def _compute_polling_profile(engine: Engine, *, default_interval: int) -> Dict[s
                 dt_utc = None
         if dt_utc and dt_utc < cutoff:
             continue
-        minute_ref = _minute_of_day_from_str(getattr(row, "start_date_local", None))
+        elapsed_seconds = 0
+        try:
+            elapsed_seconds = int(getattr(row, "elapsed_time", 0) or 0)
+        except Exception:
+            elapsed_seconds = 0
+        minute_ref = _minute_of_day_from_str(
+            getattr(row, "start_date_local", None), offset_seconds=elapsed_seconds
+        )
         if minute_ref is None and dt_utc is not None:
-            minute_ref = int(dt_utc.astimezone().hour) * 60 + int(dt_utc.astimezone().minute)
+            try:
+                dt_end = dt_utc + timedelta(seconds=elapsed_seconds)
+                dt_local = dt_end.astimezone()
+                minute_ref = int(dt_local.hour) * 60 + int(dt_local.minute)
+            except Exception:
+                minute_ref = int(dt_utc.astimezone().hour) * 60 + int(
+                    dt_utc.astimezone().minute
+                )
         if minute_ref is None:
             continue
         idx = max(0, min(1439, minute_ref))
@@ -154,7 +174,10 @@ def _compute_polling_profile(engine: Engine, *, default_interval: int) -> Dict[s
         for i, c in enumerate(counts):
             ratio = c / peak if peak else 0.0
             interval = int(
-                round(_MAX_POLL_INTERVAL - (_MAX_POLL_INTERVAL - _MIN_POLL_INTERVAL) * ratio)
+                round(
+                    _MAX_POLL_INTERVAL
+                    - (_MAX_POLL_INTERVAL - _MIN_POLL_INTERVAL) * ratio
+                )
             )
             interval = max(_MIN_POLL_INTERVAL, min(_MAX_POLL_INTERVAL, interval))
             intervals[i] = interval
@@ -167,10 +190,9 @@ def _compute_polling_profile(engine: Engine, *, default_interval: int) -> Dict[s
         "fallback": fallback,
     }
     _save_polling_profile(profile)
-    log.info(
-        "Polling profile computed: samples=%s fallback=%ss", int(total), fallback
-    )
+    log.info("Polling profile computed: samples=%s fallback=%ss", int(total), fallback)
     return profile
+
 
 async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
     client = StravaClient(engine)
@@ -178,6 +200,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
     try:
         from .db import get_cooldown_detail as _get_cd_detail
         from .timefmt import human_local_from_epoch as _hl
+
         _cd = _get_cd_detail()
         cd_until = int(_cd.get("until") or 0)
         now = int(time.time())
@@ -236,6 +259,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
         # If a cooldown is active (likely 429), do not attempt a fallback fetch
         try:
             from .db import get_cooldown_until as _get_cd
+
             if _get_cd() and int(time.time()) < _get_cd():
                 log.warning("Cooldown active; skipping fallback fetch")
                 return (0, 0, after)
@@ -297,10 +321,26 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
             start_date_local = a.get("start_date_local")
             sl = a.get("start_latlng") or [None, None]
             el = a.get("end_latlng") or [None, None]
-            start_lat = float(sl[0]) if isinstance(sl, (list, tuple)) and len(sl) >= 2 and sl[0] is not None else None
-            start_lng = float(sl[1]) if isinstance(sl, (list, tuple)) and len(sl) >= 2 and sl[1] is not None else None
-            end_lat = float(el[0]) if isinstance(el, (list, tuple)) and len(el) >= 2 and el[0] is not None else None
-            end_lng = float(el[1]) if isinstance(el, (list, tuple)) and len(el) >= 2 and el[1] is not None else None
+            start_lat = (
+                float(sl[0])
+                if isinstance(sl, (list, tuple)) and len(sl) >= 2 and sl[0] is not None
+                else None
+            )
+            start_lng = (
+                float(sl[1])
+                if isinstance(sl, (list, tuple)) and len(sl) >= 2 and sl[1] is not None
+                else None
+            )
+            end_lat = (
+                float(el[0])
+                if isinstance(el, (list, tuple)) and len(el) >= 2 and el[0] is not None
+                else None
+            )
+            end_lng = (
+                float(el[1])
+                if isinstance(el, (list, tuple)) and len(el) >= 2 and el[1] is not None
+                else None
+            )
             sport_type = a.get("sport_type")
             name = a.get("name")
             distance = a.get("distance")
@@ -361,7 +401,11 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                         "elapsed_time": elapsed_time,
                         "total_elevation_gain": total_elevation_gain,
                         "commute": 1 if commute else 0 if commute is not None else None,
-                        "hide_from_home": 1 if hide_from_home else 0 if hide_from_home is not None else None,
+                        "hide_from_home": (
+                            1
+                            if hide_from_home
+                            else 0 if hide_from_home is not None else None
+                        ),
                         "workout_type": workout_type,
                         "raw_json": raw_json,
                         "updated_at": now_iso,
@@ -437,7 +481,11 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                         "elapsed_time": elapsed_time,
                         "total_elevation_gain": total_elevation_gain,
                         "commute": 1 if commute else 0 if commute is not None else None,
-                        "hide_from_home": 1 if hide_from_home else 0 if hide_from_home is not None else None,
+                        "hide_from_home": (
+                            1
+                            if hide_from_home
+                            else 0 if hide_from_home is not None else None
+                        ),
                         "workout_type": workout_type,
                         "raw_json": raw_json,
                         "updated_at": now_iso,
@@ -505,7 +553,11 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                 changed = False
                 # Idempotency for counter templates: if desired name is a template and the current
                 # name already matches a rendered value, do not attempt to re-apply
-                if isinstance(desired_name, str) and "{count:" in desired_name and isinstance(name, str):
+                if (
+                    isinstance(desired_name, str)
+                    and "{count:" in desired_name
+                    and isinstance(name, str)
+                ):
                     if _template_already_applied(name, desired_name):
                         desired_name = name
                 if desired_name is not None and desired_name != name:
@@ -523,7 +575,10 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                 if desired_gear_id is not None:
                     payload["gear_id"] = str(desired_gear_id)
                     changed = True
-                if desired_description is not None and desired_description != description:
+                if (
+                    desired_description is not None
+                    and desired_description != description
+                ):
                     payload["description"] = desired_description
                     changed = True
                 if desired_hide_from_home is not None:
@@ -599,7 +654,9 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                         ),
                         "gear_id": upd.get("gear_id"),
                         "hide_from_home": (
-                            1 if upd.get("hide_from_home") else 0 if upd.get("hide_from_home") is not None else None
+                            1
+                            if upd.get("hide_from_home")
+                            else 0 if upd.get("hide_from_home") is not None else None
                         ),
                         "now": datetime.now(timezone.utc).isoformat(),
                     },
@@ -615,7 +672,15 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                 changes={
                     k: v
                     for k, v in upd.items()
-                    if k in ("name", "sport_type", "commute", "workout_type", "gear_id", "description")
+                    if k
+                    in (
+                        "name",
+                        "sport_type",
+                        "commute",
+                        "workout_type",
+                        "gear_id",
+                        "description",
+                    )
                     and v is not None
                 },
                 error=None,
@@ -623,7 +688,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
         except Exception:
             # Do not fail ingestion if audit write fails
             pass
-    
+
     log.info(
         "Ingested activities: inserted=%s updated=%s after=%s -> %s",
         inserted,
@@ -788,7 +853,11 @@ async def refresh_activity_detail(
         "updated": changed,
         "activity_id": activity_id,
         "message": message,
-        "applied_fields": [s.split(" = ")[0] for s in sets if s not in {"updated_at = :now", "raw_json = :raw_json"}],
+        "applied_fields": [
+            s.split(" = ")[0]
+            for s in sets
+            if s not in {"updated_at = :now", "raw_json = :raw_json"}
+        ],
     }
 
 
@@ -798,7 +867,9 @@ def start_scheduler(engine: Optional[Engine] = None) -> AsyncIOScheduler:
     eng = engine or get_engine()
     # Environment variable remains the fallback/default interval when no historical data exists.
     default_interval = int(os.getenv("POLLING_INTERVAL_SEC", "120"))
-    default_interval = max(_MIN_POLL_INTERVAL, min(_MAX_POLL_INTERVAL, default_interval))
+    default_interval = max(
+        _MIN_POLL_INTERVAL, min(_MAX_POLL_INTERVAL, default_interval)
+    )
     scheduler = AsyncIOScheduler()
 
     profile = _load_polling_profile()
@@ -818,7 +889,9 @@ def start_scheduler(engine: Optional[Engine] = None) -> AsyncIOScheduler:
         prof = state.get("profile") or {}
         valid_until = int(prof.get("valid_until") or 0)
         if not prof or now_epoch >= valid_until:
-            prof = _compute_polling_profile(eng, default_interval=state["default_interval"])
+            prof = _compute_polling_profile(
+                eng, default_interval=state["default_interval"]
+            )
             state["profile"] = prof
         intervals = prof.get("intervals") or {}
         minute = _minute_of_day_from_epoch(now_epoch)
@@ -829,7 +902,24 @@ def start_scheduler(engine: Optional[Engine] = None) -> AsyncIOScheduler:
 
         last_run = float(state.get("last_run_ts") or 0.0)
         since_last = now_epoch - last_run if last_run else None
-        if last_run and since_last is not None and since_last < max(desired - 1, _MIN_POLL_INTERVAL / 2):
+
+        def _persist_schedule(next_epoch: float) -> None:
+            try:
+                set_setting("scheduler_current_interval_sec", str(int(desired)))
+                set_setting("scheduler_next_run_epoch", str(int(max(0, next_epoch))))
+            except Exception:
+                pass
+
+        if last_run:
+            _persist_schedule(last_run + desired)
+        else:
+            _persist_schedule(now_epoch)
+
+        if (
+            last_run
+            and since_last is not None
+            and since_last < max(desired - 1, _MIN_POLL_INTERVAL / 2)
+        ):
             state["skip_runs"] = state.get("skip_runs", 0) + 1
             if state["skip_runs"] % 5 == 0:
                 log.debug(
@@ -857,7 +947,9 @@ def start_scheduler(engine: Optional[Engine] = None) -> AsyncIOScheduler:
             # Never crash the scheduler on transient errors
             log.exception("Scheduler run failed: %s", e)
         finally:
-            state["last_run_ts"] = time.time()
+            finish = time.time()
+            state["last_run_ts"] = finish
+            _persist_schedule(finish + desired)
 
     scheduler.add_job(
         job_wrapper,
@@ -947,10 +1039,14 @@ def _conditions_match(
             except Exception:
                 return False
             lat = (
-                activity.get("start_lat") if ctype == "start_near" else activity.get("end_lat")
+                activity.get("start_lat")
+                if ctype == "start_near"
+                else activity.get("end_lat")
             )
             lng = (
-                activity.get("start_lng") if ctype == "start_near" else activity.get("end_lng")
+                activity.get("start_lng")
+                if ctype == "start_near"
+                else activity.get("end_lng")
             )
             if lat is None or lng is None:
                 return False
@@ -1013,6 +1109,7 @@ def _conditions_match(
                 # Unknown op
                 return False
             from datetime import datetime, timezone
+
             lo_iso = datetime.fromtimestamp(lo, tz=timezone.utc).isoformat()
             ref_iso = ref_dt.astimezone(timezone.utc).isoformat()
             hi_iso = datetime.fromtimestamp(hi, tz=timezone.utc).isoformat()
@@ -1025,6 +1122,7 @@ def _conditions_match(
             # Query existence of any activity within the window
             try:
                 from .db import get_engine as _get_engine
+
                 eng = _get_engine()
                 with eng.connect() as conn:
                     q = f"SELECT id FROM activities WHERE {where} ORDER BY start_date LIMIT 1"
@@ -1046,7 +1144,10 @@ def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371000.0
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
-    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    a = (
+        sin(dlat / 2) ** 2
+        + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    )
     c = 2 * asin(sqrt(a))
     return R * c
 
@@ -1103,12 +1204,14 @@ _COUNT_RE = re.compile(r"\{count:([A-Za-z0-9_\-]+)\}")
 def _render_title_with_counters(name: Optional[str]) -> Optional[str]:
     if not name:
         return name
+
     def repl(m: re.Match[str]) -> str:
         key = m.group(1)
         try:
             return str(inc_counter(key))
         except Exception:
             return "0"
+
     return _COUNT_RE.sub(repl, name)
 
 

@@ -1,6 +1,9 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
+
+from sqlalchemy import text as sql_text
 
 os.environ['DISABLE_SCHEDULER'] = '0'  # allow testing scheduler branch
 
@@ -99,3 +102,36 @@ class TestMainEndpoints(unittest.TestCase):
             self.assertEqual(r.json()['athlete_id'], 42)
         finally:
             self.main.StravaClient.exchange_code_for_token = orig_exchange  # type: ignore[attr-defined]
+
+    def test_polling_profile_endpoint(self):
+        now = datetime.now(timezone.utc)
+        with self.main.engine.begin() as conn:
+            conn.execute(sql_text("DELETE FROM activities"))
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO activities (id, start_date, start_date_local, elapsed_time, raw_json, updated_at)
+                    VALUES (:id, :sd, :sdl, :elapsed, :raw, :updated)
+                    """
+                ),
+                {
+                    "id": 1,
+                    "sd": now.isoformat(),
+                    "sdl": now.astimezone().isoformat(),
+                    "elapsed": 120,
+                    "raw": "{}",
+                    "updated": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+        # Force computation so polling profile is populated
+        from api import scheduler as _scheduler  # type: ignore
+
+        _scheduler._compute_polling_profile(self.main.engine, default_interval=300)
+
+        r = self.client.get('/api/admin/polling_profile')
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(len(data['intervals']), 1440)
+        self.assertEqual(data['total_samples'], 1)
+        self.assertIn('fallback', data)

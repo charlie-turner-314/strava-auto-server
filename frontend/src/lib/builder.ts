@@ -72,6 +72,16 @@ export function conditionFromSelection(kind: ConditionKind, raw: string): Condit
     case 'day_of_week':
       return conditionFrom('day_of_week', 'in', raw)
   }
+  switch (kind as string) {
+    case 'distance_greater_than':
+      return conditionFrom('distance', 'gt', raw)
+    case 'moving_time_greater_than':
+      return conditionFrom('moving_time', 'gt', raw)
+    case 'elevation_gain_greater_than':
+      return conditionFrom('total_elevation_gain', 'gt', raw)
+    case 'title_contains':
+      return conditionFrom('title', 'contains', raw)
+  }
 }
 
 export function effectFromSelection(kind: EffectKind, raw: string): Effect {

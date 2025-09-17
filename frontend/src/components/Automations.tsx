@@ -4,6 +4,22 @@ import { useMemo, useState } from 'react'
 import { CONDITION_SPECS, conditionFrom, conditionFromSelection, effectFromSelection, type ConditionKind, type ConditionOp, type EffectKind } from '../lib/builder'
 import { evaluateConditions, previewEffects } from '../lib/eval'
 
+const CONDITION_LABELS: Record<string, string> = Object.fromEntries(
+  Object.entries(CONDITION_SPECS).map(([k, spec]) => [k, spec.label])
+)
+
+const EFFECT_LABELS: Record<string, string> = {
+  set_title_suffix: 'Set title suffix',
+  set_title_prefix: 'Set title prefix',
+  set_title_template: 'Set title template',
+  set_commute: 'Mark as commute',
+  set_sport_type: 'Set sport type',
+  set_long_run_tag: 'Mark as long run',
+  set_shoes_by_id: 'Set shoes by ID',
+  hide_from_feeds: 'Hide from feeds',
+  set_description: 'Set description',
+}
+
 function JsonTextarea({ value, onChange, rows = 4 }: { value: string; onChange: (v: string) => void; rows?: number }) {
   return (
     <textarea
@@ -32,9 +48,6 @@ export function Automations() {
   // Builder state
   const [builtConds, setBuiltConds] = useState<CondType[]>([])
   const [builtEffs, setBuiltEffs] = useState<EffType[]>([])
-
-  const builtCondsJson = useMemo(() => JSON.stringify(builtConds, null, 2), [builtConds])
-  const builtEffsJson = useMemo(() => JSON.stringify(builtEffs, null, 2), [builtEffs])
 
   const saveMut = useMutation({
     mutationFn: async () => {
@@ -185,7 +198,6 @@ export function Automations() {
           )}
         </div>
         <PreviewPanel conditions={useBuilder ? builtConds : safeParseArray<CondType>(conditions)} effects={useBuilder ? builtEffs : safeParseArray<EffType>(effects)} />
-        <AutomationHelp />
       </div>
     </div>
   )
@@ -302,11 +314,13 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
             <option key={k} value={k}>{spec.label}</option>
           ))}
         </select>
-        <select value={op} onChange={(e) => setOp(e.target.value as ConditionOp)}>
-          {CONDITION_SPECS[type].ops.map((o) => (
-            <option key={o} value={o}>{o}</option>
-          ))}
-        </select>
+        {CONDITION_SPECS[type].ops.length > 1 && (
+          <select value={op} onChange={(e) => setOp(e.target.value as ConditionOp)}>
+            {CONDITION_SPECS[type].ops.map((o) => (
+              <option key={o} value={o}>{o}</option>
+            ))}
+          </select>
+        )}
         {type !== 'day_of_week' && type !== 'start_near' && type !== 'end_near' && (
           <input
             value={val}
@@ -386,16 +400,31 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
         )}
         <button onClick={add}>Add</button>
       </div>
-      <pre style={{ background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', padding: 8, maxHeight: 160, overflow: 'auto', borderRadius: 6 }}>{JSON.stringify(value, null, 2)}</pre>
       {value.length > 0 && (
-        <ul>
-          {value.map((c, i) => (
-            <li key={i}>
-              <code>{c.type}</code> <code>{(c as any).op}</code> <code>{String((c as any).value)}</code>
-              <button onClick={() => remove(i)} style={{ marginLeft: 8 }}>Remove</button>
-            </li>
-          ))}
-        </ul>
+        <div style={{ marginTop: 8, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead style={{ background: 'var(--surface-strong, #f5f5f5)' }}>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '6px 8px' }}>Condition</th>
+                <th style={{ textAlign: 'left', padding: '6px 8px' }}>Operator</th>
+                <th style={{ textAlign: 'left', padding: '6px 8px' }}>Value</th>
+                <th style={{ width: 70 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {value.map((c, i) => (
+                <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 8px' }}>{describeConditionType(c)}</td>
+                  <td style={{ padding: '6px 8px' }}>{c.op || '—'}</td>
+                  <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{formatConditionValue(c)}</td>
+                  <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                    <button onClick={() => remove(i)}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
@@ -444,46 +473,31 @@ function BuilderEffects({ value, onChange }: { value: EffType[]; onChange: (v: E
         )}
         <button onClick={add}>Add</button>
       </div>
-      <pre style={{ background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', padding: 8, maxHeight: 160, overflow: 'auto', borderRadius: 6 }}>{JSON.stringify(value, null, 2)}</pre>
       {value.length > 0 && (
-        <ul>
-          {value.map((e, i) => (
-            <li key={i}>
-              <code>{e.type}</code> {e.params && <code>{JSON.stringify(e.params)}</code>}
-              <button onClick={() => remove(i)} style={{ marginLeft: 8 }}>Remove</button>
-            </li>
-          ))}
-        </ul>
+        <div style={{ marginTop: 8, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            <thead style={{ background: 'var(--surface-strong, #f5f5f5)' }}>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '6px 8px' }}>Effect</th>
+                <th style={{ textAlign: 'left', padding: '6px 8px' }}>Details</th>
+                <th style={{ width: 70 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {value.map((e, i) => (
+                <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                  <td style={{ padding: '6px 8px' }}>{describeEffectType(e)}</td>
+                  <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{formatEffectValue(e)}</td>
+                  <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                    <button onClick={() => remove(i)}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
-  )
-}
-
-function AutomationHelp() {
-  return (
-    <details style={{ marginTop: 12 }}>
-      <summary>What JSON is valid?</summary>
-      <div style={{ fontSize: 14 }}>
-        <p>Conditions are objects with fields: <code>type</code>, <code>op</code>, <code>value</code>. Examples:</p>
-        <pre>{`[
-  { "type": "sport_type", "op": "equals", "value": "Run" },
-  { "type": "distance", "op": "gt", "value": 5000 },
-  { "type": "moving_time", "op": "gt", "value": 1800 },
-  { "type": "total_elevation_gain", "op": "gt", "value": 300 },
-  { "type": "title", "op": "contains", "value": "Commute" },
-  { "type": "day_of_week", "op": "in", "value": ["Mon", "Wed", "Fri"] }
-]`}</pre>
-        <p>Effects are objects with fields: <code>type</code> and optional <code>params</code>. Examples:</p>
-        <pre>{`[
-  { "type": "set_title_suffix", "params": { "suffix": " 🚀" } },
-  { "type": "set_title_prefix", "params": { "prefix": "[Ride] " } },
-  { "type": "set_commute", "params": { "commute": true } },
-  { "type": "set_sport_type", "params": { "sport_type": "Ride" } },
-  { "type": "set_long_run_tag" }
-]`}</pre>
-        <p>These are MVP examples; backend currently stores JSON as-is. Future releases will validate and execute effects.</p>
-      </div>
-    </details>
   )
 }
 
@@ -505,79 +519,284 @@ function EnabledToggle({ id, enabled, onChange }: { id: string; enabled: boolean
   )
 }
 
+type SampleForm = {
+  name: string
+  sportType: string
+  startDate: string
+  startDateLocal: string
+  distance: string
+  movingTime: string
+  elapsedTime: string
+  totalElevation: string
+  startLat: string
+  startLng: string
+  endLat: string
+  endLng: string
+  commute: boolean
+  description: string
+  gearId: string
+}
+
 function PreviewPanel({ conditions, effects }: { conditions: CondType[]; effects: EffType[] }) {
-  const [sample, setSample] = useState<string>(
-    JSON.stringify(
-      {
-        id: 1,
-        start_date: '2024-01-01T10:00:00Z',
-        start_date_local: '2024-01-01T21:00:00+11:00',
-        sport_type: 'Run',
-        name: 'Morning Run',
-        distance: 5000,
-        moving_time: 1800,
-        elapsed_time: 1900,
-        total_elevation_gain: 120,
-      },
-      null,
-      2,
-    ),
-  )
-  let activity: any = null
-  try {
-    activity = JSON.parse(sample)
-  } catch {
-    activity = null
+  const [sample, setSample] = useState<SampleForm>({
+    name: 'Morning Run',
+    sportType: 'Run',
+    startDate: '2024-01-01T10:00',
+    startDateLocal: '2024-01-01T21:00',
+    distance: '5000',
+    movingTime: '1800',
+    elapsedTime: '1900',
+    totalElevation: '120',
+    startLat: '',
+    startLng: '',
+    endLat: '',
+    endLng: '',
+    commute: false,
+    description: '',
+    gearId: '',
+  })
+
+  function updateSample<K extends keyof SampleForm>(key: K, value: SampleForm[K]) {
+    setSample((prev) => ({ ...prev, [key]: value }))
   }
-  const applies = activity ? evaluateConditions(conditions, activity) : false
-  const preview = activity && applies ? previewEffects(effects, activity) : null
+
+  const activity = useMemo(() => {
+    const toIso = (val: string) => {
+      if (!val) return null
+      const dt = new Date(val)
+      if (Number.isNaN(dt.getTime())) return val
+      return dt.toISOString()
+    }
+    const parseNum = (val: string) => {
+      if (!val) return null
+      const n = Number(val)
+      return Number.isFinite(n) ? n : null
+    }
+    const base: any = {
+      id: 1,
+      name: sample.name || '',
+      sport_type: sample.sportType || null,
+      start_date: sample.startDate ? toIso(sample.startDate) : null,
+      start_date_local: sample.startDateLocal ? toIso(sample.startDateLocal) : null,
+      distance: parseNum(sample.distance),
+      moving_time: parseNum(sample.movingTime),
+      elapsed_time: parseNum(sample.elapsedTime),
+      total_elevation_gain: parseNum(sample.totalElevation),
+      commute: sample.commute,
+      description: sample.description || null,
+      gear_id: sample.gearId || null,
+    }
+    const startLat = parseNum(sample.startLat)
+    const startLng = parseNum(sample.startLng)
+    const endLat = parseNum(sample.endLat)
+    const endLng = parseNum(sample.endLng)
+    if (startLat !== null) base.start_lat = startLat
+    if (startLng !== null) base.start_lng = startLng
+    if (endLat !== null) base.end_lat = endLat
+    if (endLng !== null) base.end_lng = endLng
+    return base
+  }, [sample])
+
+  const applies = evaluateConditions(conditions, activity)
+  const preview = applies ? previewEffects(effects, activity) : null
 
   return (
     <div style={{ marginTop: 16 }}>
       <h4 style={{ marginBottom: 8 }}>Preview</h4>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Sample activity JSON</div>
-          <textarea
-            value={sample}
-            onChange={(e) => setSample(e.target.value)}
-            rows={10}
-            style={{ width: '100%', fontFamily: 'monospace', fontSize: 13, background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 6, padding: 8 }}
-          />
+        <div style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Sample activity</div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>Title</span>
+              <input value={sample.name} onChange={(e) => updateSample('name', e.target.value)} />
+            </label>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>Sport type</span>
+              <select value={sample.sportType} onChange={(e) => updateSample('sportType', e.target.value)}>
+                {['Run', 'Ride', 'Walk', 'Hike', 'Swim', 'Workout'].map((opt) => (
+                  <option key={opt} value={opt}>{opt}</option>
+                ))}
+                <option value="">(none)</option>
+              </select>
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Start date (UTC)</span>
+                <input type="datetime-local" value={sample.startDate} onChange={(e) => updateSample('startDate', e.target.value)} />
+              </label>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Start date (local)</span>
+                <input type="datetime-local" value={sample.startDateLocal} onChange={(e) => updateSample('startDateLocal', e.target.value)} />
+              </label>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Distance (m)</span>
+                <input type="number" value={sample.distance} onChange={(e) => updateSample('distance', e.target.value)} />
+              </label>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Moving time (s)</span>
+                <input type="number" value={sample.movingTime} onChange={(e) => updateSample('movingTime', e.target.value)} />
+              </label>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Elapsed time (s)</span>
+                <input type="number" value={sample.elapsedTime} onChange={(e) => updateSample('elapsedTime', e.target.value)} />
+              </label>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Elevation gain (m)</span>
+                <input type="number" value={sample.totalElevation} onChange={(e) => updateSample('totalElevation', e.target.value)} />
+              </label>
+              <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 16 }}>
+                <input type="checkbox" checked={sample.commute} onChange={(e) => updateSample('commute', e.target.checked)} /> Commute
+              </label>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Start lat</span>
+                <input type="number" step="any" value={sample.startLat} onChange={(e) => updateSample('startLat', e.target.value)} />
+              </label>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Start lon</span>
+                <input type="number" step="any" value={sample.startLng} onChange={(e) => updateSample('startLng', e.target.value)} />
+              </label>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>End lat</span>
+                <input type="number" step="any" value={sample.endLat} onChange={(e) => updateSample('endLat', e.target.value)} />
+              </label>
+              <label style={{ display: 'grid', gap: 4 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>End lon</span>
+                <input type="number" step="any" value={sample.endLng} onChange={(e) => updateSample('endLng', e.target.value)} />
+              </label>
+            </div>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>Description</span>
+              <textarea rows={3} value={sample.description} onChange={(e) => updateSample('description', e.target.value)} />
+            </label>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>Gear ID</span>
+              <input value={sample.gearId} onChange={(e) => updateSample('gearId', e.target.value)} placeholder="e.g. gear_123" />
+            </label>
+          </div>
         </div>
-        <div>
-          <div style={{ fontSize: 12, color: 'var(--muted)' }}>Result</div>
-          {!activity && <div style={{ color: 'crimson' }}>Invalid JSON</div>}
-          {activity && (
-            <div style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 8 }}>
-              <div>
-                Would apply: <strong>{applies ? 'Yes' : 'No'}</strong>
-              </div>
-              {applies && preview && (
-                <ul>
-                  {'name' in preview && preview.name !== undefined && (
-                    <li>
-                      New title: <code>{String(preview.name)}</code>
-                    </li>
-                  )}
-                  {'sport_type' in preview && preview.sport_type !== undefined && (
-                    <li>
-                      New sport type: <code>{String(preview.sport_type)}</code>
-                    </li>
-                  )}
-                  {'commute' in preview && preview.commute !== null && (
-                    <li>
-                      Commute: <code>{String(preview.commute)}</code>
-                    </li>
-                  )}
-                </ul>
+        <div style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 12 }}>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>Result</div>
+          <div>
+            Would apply: <strong>{applies ? 'Yes' : 'No'}</strong>
+          </div>
+          {applies && preview && (
+            <div style={{ marginTop: 8, display: 'grid', gap: 8 }}>
+              {preview.tags && preview.tags.length > 0 && (
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {preview.tags.map((tag) => (
+                    <PreviewTag key={tag}>{tag}</PreviewTag>
+                  ))}
+                </div>
               )}
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {preview.name !== undefined && (
+                  <li>Title → <code>{String(preview.name ?? '')}</code></li>
+                )}
+                {preview.sport_type !== undefined && (
+                  <li>Sport type → <code>{String(preview.sport_type ?? '')}</code></li>
+                )}
+                {preview.commute !== null && preview.commute !== undefined && (
+                  <li>Commute → <code>{preview.commute ? 'Yes' : 'No'}</code></li>
+                )}
+                {preview.gear_id !== undefined && preview.gear_id !== null && (
+                  <li>Shoes/Gear → <code>{String(preview.gear_id)}</code></li>
+                )}
+                {preview.description !== undefined && preview.description !== null && (
+                  <li>Description → <code>{String(preview.description)}</code></li>
+                )}
+                {preview.hide_from_home !== undefined && preview.hide_from_home !== null && (
+                  <li>Hide from home feed → <code>{preview.hide_from_home ? 'Yes' : 'No'}</code></li>
+                )}
+              </ul>
             </div>
           )}
         </div>
       </div>
     </div>
   )
+}
+
+function PreviewTag({ children }: { children: React.ReactNode }) {
+  return (
+    <span
+      style={{
+        background: 'var(--tag-bg)',
+        color: 'var(--tag-fg)',
+        border: '1px solid var(--tag-border)',
+        borderRadius: 999,
+        padding: '2px 8px',
+        fontSize: 11,
+      }}
+    >
+      {children}
+    </span>
+  )
+}
+
+function describeConditionType(c: CondType): string {
+  return CONDITION_LABELS[c.type as string] ?? c.type
+}
+
+function formatConditionValue(c: CondType): string {
+  const value = (c as any).value
+  if (value === undefined || value === null || (Array.isArray(value) && value.length === 0)) {
+    return '—'
+  }
+  if (Array.isArray(value)) {
+    return value.join(', ')
+  }
+  if (typeof value === 'object') {
+    const maybe = value as any
+    if (typeof maybe.lat === 'number' && typeof maybe.lon === 'number') {
+      const radius = typeof maybe.radius_m === 'number' ? maybe.radius_m : maybe.radius
+      const lat = Number.isFinite(maybe.lat) ? maybe.lat.toFixed(4) : String(maybe.lat)
+      const lon = Number.isFinite(maybe.lon) ? maybe.lon.toFixed(4) : String(maybe.lon)
+      const radiusText = radius != null && Number.isFinite(radius) ? `${radius}m` : '?'
+      return `${lat}, ${lon} (±${radiusText})`
+    }
+    return JSON.stringify(value)
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false'
+  }
+  return String(value)
+}
+
+function describeEffectType(e: EffType): string {
+  return EFFECT_LABELS[e.type as string] ?? e.type
+}
+
+function formatEffectValue(e: EffType): string {
+  const params = (e as any).params ?? {}
+  switch (e.type) {
+    case 'set_title_suffix':
+      return params.suffix ? `suffix: ${params.suffix}` : 'suffix: (empty)'
+    case 'set_title_prefix':
+      return params.prefix ? `prefix: ${params.prefix}` : 'prefix: (empty)'
+    case 'set_title_template':
+      return params.template ? `template: ${params.template}` : 'template: (empty)'
+    case 'set_sport_type':
+      return params.sport_type ? `sport_type: ${params.sport_type}` : 'sport_type: (empty)'
+    case 'set_commute':
+      return `commute: ${params.commute ?? true}`
+    case 'set_shoes_by_id':
+      return params.gear_id ? `gear_id: ${params.gear_id}` : 'gear_id: (empty)'
+    case 'hide_from_feeds':
+      return `home: ${params.home ?? true}, clubs: ${params.clubs ?? true}`
+    case 'set_description':
+      return params.text ? `description: ${params.text}` : 'description: (empty)'
+    case 'set_long_run_tag':
+      return 'Adds Long run tag'
+    default:
+      return Object.keys(params).length ? JSON.stringify(params) : '—'
+  }
 }
 
 function safeParseArray<T>(text: string): T[] {

@@ -1,7 +1,8 @@
 // Minimal API client using fetch. Base URL from VITE_API_BASE or default.
 
 // Prefer relative base so Vite dev proxy handles CORS in dev.
-const API_BASE = (import.meta.env.VITE_API_BASE ?? '').trim();
+const explicitBase = (import.meta.env.VITE_API_BASE ?? '').trim();
+const API_BASE = explicitBase || (import.meta.env.MODE === 'test' ? 'http://localhost:8000' : '');
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -232,10 +233,25 @@ export type RateLimitMetrics = {
   errors_429_15m: number;
   errors_429_24h: number;
   last_headers: { usage_min: number | null; usage_day: number | null; limit_min: number | null; limit_day: number | null; last_status: number | null } | null;
+  next_sync_epoch: number;
+  next_sync_local: string;
+  current_interval_sec: number;
 }
 
 export async function getRateLimitMetrics(): Promise<RateLimitMetrics> {
   return http<RateLimitMetrics>('/api/admin/ratelimit')
+}
+
+export type PollingProfile = {
+  intervals: number[];
+  computed_at?: string | null;
+  valid_until?: number | null;
+  fallback: number;
+  total_samples: number;
+}
+
+export async function getPollingProfile(): Promise<PollingProfile> {
+  return http<PollingProfile>('/api/admin/polling_profile')
 }
 
 // Counters ------------------------------------------------------------------

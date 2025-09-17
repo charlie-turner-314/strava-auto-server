@@ -83,6 +83,9 @@ export type EffectPreview = {
   sport_type?: string | null
   commute?: boolean | null
   gear_id?: string | null
+  description?: string | null
+  hide_from_home?: boolean | null
+  tags?: string[]
 }
 
 export function previewEffects(effects: Effect[], activity: Activity): EffectPreview {
@@ -90,6 +93,9 @@ export function previewEffects(effects: Effect[], activity: Activity): EffectPre
   let sport_type = activity.sport_type ?? null
   let commute: boolean | null = null
   let gear_id: string | null = (activity as any).gear_id ?? null
+  let description: string | null = (activity as any).description ?? null
+  let hide_from_home: boolean | null = null
+  const tagSet = new Set<string>()
   for (const e of effects) {
     switch (e.type) {
       case 'set_title_suffix': {
@@ -105,6 +111,7 @@ export function previewEffects(effects: Effect[], activity: Activity): EffectPre
       case 'set_commute': {
         const c = (e as any).params?.commute
         commute = Boolean(c ?? true)
+        if (commute) tagSet.add('Commute')
         break
       }
       case 'set_sport_type': {
@@ -123,7 +130,31 @@ export function previewEffects(effects: Effect[], activity: Activity): EffectPre
         gear_id = gid ? String(gid) : gear_id
         break
       }
+      case 'set_long_run_tag': {
+        tagSet.add('Long run')
+        break
+      }
+      case 'hide_from_feeds': {
+        const params = (e as any).params ?? {}
+        const home = params.home ?? true
+        hide_from_home = Boolean(home)
+        if (hide_from_home) tagSet.add('Hidden from feeds')
+        break
+      }
+      case 'set_description': {
+        const text = (e as any).params?.text
+        description = text != null ? String(text) : ''
+        break
+      }
     }
   }
-  return { name, sport_type, commute, gear_id }
+  return {
+    name,
+    sport_type,
+    commute,
+    gear_id,
+    description,
+    hide_from_home,
+    tags: Array.from(tagSet),
+  }
 }

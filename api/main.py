@@ -194,7 +194,7 @@ def healthz() -> Dict[str, Any]:
 
 @app.get("/api/admin/ratelimit")
 def get_ratelimit_metrics() -> Dict[str, Any]:
-    from .db import get_cooldown_detail as _get_cd_detail
+    from .db import get_cooldown_detail as _get_cd_detail, get_setting as _get_setting
     from .timefmt import human_local_from_epoch as _hl
     now = int(datetime.now(timezone.utc).timestamp())
     cd_detail = _get_cd_detail()
@@ -232,6 +232,17 @@ def get_ratelimit_metrics() -> Dict[str, Any]:
         if local:
             parts.append(f"until {local}")
         msg = "; ".join(parts)
+    next_sync_raw = _get_setting("scheduler_next_run_epoch", "0")
+    try:
+        next_sync_epoch = int(next_sync_raw or 0)
+    except Exception:
+        next_sync_epoch = 0
+    interval_raw = _get_setting("scheduler_current_interval_sec", "0")
+    try:
+        current_interval_sec = int(interval_raw or 0)
+    except Exception:
+        current_interval_sec = 0
+    next_sync_local = _hl(next_sync_epoch) if next_sync_epoch else ""
     return {
         "now": now,
         "cooldown_until": int(cd or 0),
@@ -245,6 +256,36 @@ def get_ratelimit_metrics() -> Dict[str, Any]:
         "errors_429_15m": int(e15 or 0),
         "errors_429_24h": int(e24 or 0),
         "last_headers": hdrs,
+        "next_sync_epoch": next_sync_epoch,
+        "next_sync_local": next_sync_local,
+        "current_interval_sec": current_interval_sec,
+    }
+
+
+@app.get("/api/admin/polling_profile")
+def get_polling_profile() -> Dict[str, Any]:
+    profile = _scheduler._load_polling_profile()
+    if not profile:
+        profile = {}
+    intervals_map = profile.get("intervals") or {}
+    fallback = int(profile.get("fallback") or 0)
+    intervals: list[int] = []
+    for minute in range(1440):
+        val = intervals_map.get(minute)
+        if val is None:
+            val = intervals_map.get(str(minute))
+        if val is None:
+            val = fallback
+        try:
+            intervals.append(int(val))
+        except Exception:
+            intervals.append(fallback)
+    return {
+        "intervals": intervals,
+        "computed_at": profile.get("computed_at"),
+        "valid_until": profile.get("valid_until"),
+        "fallback": fallback,
+        "total_samples": profile.get("total_samples") or 0,
     }
 
 
