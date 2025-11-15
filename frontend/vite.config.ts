@@ -10,5 +10,6 @@ export default defineConfig({
       "/api": "http://localhost:8000",
     },
     host: true,
+    allowedHosts: ["alpha-alfred.mynetgear.com"],
   },
 });

@@ -93,6 +93,7 @@ def ensure_schema() -> None:
         commute INTEGER,
         workout_type INTEGER,
         hide_from_home INTEGER,
+        detail_json TEXT,
         raw_json TEXT NOT NULL,
         updated_at TIMESTAMP NOT NULL
     );
@@ -204,6 +205,8 @@ def ensure_schema() -> None:
                 conn.execute(sql_text("ALTER TABLE activities ADD COLUMN avg_pace_s_per_km REAL"))
             if "hide_from_home" not in existing:
                 conn.execute(sql_text("ALTER TABLE activities ADD COLUMN hide_from_home INTEGER"))
+            if "detail_json" not in existing:
+                conn.execute(sql_text("ALTER TABLE activities ADD COLUMN detail_json TEXT"))
         except Exception:
             # On non-SQLite backends, PRAGMA may fail; ignore as these are optional fields
             pass

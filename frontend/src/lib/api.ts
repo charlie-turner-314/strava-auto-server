@@ -36,6 +36,29 @@ export async function getAuthInit(): Promise<AuthInit> {
   return http<AuthInit>('/api/auth/strava/init');
 }
 
+export type SessionInfo = {
+  authenticated: boolean;
+  username?: string | null;
+};
+
+export async function login(username: string, password: string): Promise<SessionInfo> {
+  return http<SessionInfo>('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export async function logout(): Promise<SessionInfo> {
+  return http<SessionInfo>('/api/logout', {
+    method: 'POST',
+  });
+}
+
+export async function getSession(): Promise<SessionInfo> {
+  return http<SessionInfo>('/api/session');
+}
+
 export type Activity = {
   id: number;
   start_date: string | null;
@@ -61,6 +84,28 @@ export async function getActivities(limit = 10, offset = 0, sport?: string): Pro
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (sport && sport.trim()) params.set('sport', sport.trim());
   return http<ActivitiesPage>(`/api/activities?${params.toString()}`);
+}
+
+export type ShoeStatsItem = {
+  gear_id: string;
+  name: string;
+  is_primary: boolean;
+  lifetime_distance: number | null;
+  activity_count: number;
+  total_distance: number;
+  total_moving_time: number;
+  avg_cadence: number | null;
+  avg_pace_s_per_km: number | null;
+  first_activity_at: string | null;
+  last_activity_at: string | null;
+};
+
+export type ShoeStatsResponse = {
+  items: ShoeStatsItem[];
+};
+
+export async function getShoeStats(): Promise<ShoeStatsResponse> {
+  return http<ShoeStatsResponse>('/api/gear/shoes');
 }
 
 export { API_BASE };

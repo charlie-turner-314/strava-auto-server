@@ -10,15 +10,57 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
+import httpx
 from sqlalchemy import text as sql_text
 
-from .db import get_engine, ensure_schema
+from .db import get_engine, ensure_schema, get_cooldown_detail
 from .strava_client import StravaClient
 from . import scheduler as _scheduler
 
 log = logging.getLogger("strava-auto-server.backfill")
+
+COOLDOWN_BUFFER_SECONDS = 30
+COOLDOWN_TICK_SECONDS = 30
+
+
+async def _wait_for_cooldown(tag: str) -> None:
+    """Poll cooldown state and sleep until it clears, keeping a buffer for the app."""
+
+    while True:
+        try:
+            detail = get_cooldown_detail()
+        except Exception:
+            return
+        until_raw = detail.get("until") if detail else 0
+        try:
+            cd_until = int(until_raw or 0)
+        except Exception:
+            cd_until = 0
+        now = int(time.time())
+        if not cd_until or now >= cd_until:
+            return
+        reason = str(detail.get("reason") or "Strava cooldown") if detail else "Strava cooldown"
+        scope = str(detail.get("scope") or "") if detail else ""
+        wait_core = max(0, cd_until - now)
+        total_wait = wait_core + COOLDOWN_BUFFER_SECONDS
+        scope_note = f" ({scope})" if scope else ""
+        log.info(
+            "%s: cooldown active%s (%s); sleeping %.0fs (%.0fs buffer)",
+            tag,
+            scope_note,
+            reason,
+            total_wait,
+            COOLDOWN_BUFFER_SECONDS,
+        )
+        end_time = time.time() + total_wait
+        while True:
+            remaining = end_time - time.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(remaining, COOLDOWN_TICK_SECONDS))
 
 
 async def backfill() -> None:
@@ -28,6 +70,7 @@ async def backfill() -> None:
 
     # Sync gear first (lifetime distances)
     try:
+        await _wait_for_cooldown("gear sync")
         await _scheduler._sync_gear(engine, client)  # type: ignore[attr-defined]
     except Exception as e:  # noqa: BLE001
         log.warning("Gear sync failed: %s", e)
@@ -47,11 +90,21 @@ async def backfill() -> None:
         aid = int(r.id)
         sport = (r.sport_type or "").lower()
         # Fetch detail
+        await _wait_for_cooldown(f"activity {aid} detail")
         try:
             detail = await client.get_activity_detail(aid)
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 429:
+                log.warning("Detail fetch hit Strava 429 for %s; entering cooldown", aid)
+            else:
+                log.warning("Detail fetch failed for %s: %s", aid, e)
+            await _wait_for_cooldown(f"activity {aid} detail after error")
+            await asyncio.sleep(0.5)
+            continue
         except Exception as e:  # noqa: BLE001
             log.warning("Detail fetch failed for %s: %s", aid, e)
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.5)
             continue
 
         # Extract fields
@@ -74,6 +127,8 @@ async def backfill() -> None:
         except Exception:
             avg_pace = None
 
+        detail_json = _scheduler._canonical_json(detail)
+
         # Update activities row
         with engine.begin() as conn:
             conn.execute(
@@ -90,7 +145,8 @@ async def backfill() -> None:
                       elapsed_time = COALESCE(:elapsed_time, elapsed_time),
                       total_elevation_gain = COALESCE(:elev, total_elevation_gain),
                       avg_cadence = COALESCE(:avg_cadence, avg_cadence),
-                      avg_pace_s_per_km = COALESCE(:avg_pace, avg_pace_s_per_km)
+                      avg_pace_s_per_km = COALESCE(:avg_pace, avg_pace_s_per_km),
+                      detail_json = :detail_json
                     WHERE id = :id
                     """
                 ),
@@ -107,16 +163,27 @@ async def backfill() -> None:
                     "elev": elev_gain,
                     "avg_cadence": avg_cadence,
                     "avg_pace": avg_pace,
+                    "detail_json": detail_json,
                 },
             )
 
         # Laps for runs
         if sport in ("run", "trailrun", "virtualrun"):
             try:
+                await _wait_for_cooldown(f"activity {aid} laps")
                 laps = await client.get_activity_laps(aid)
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 429:
+                    log.warning("Laps fetch hit Strava 429 for %s; entering cooldown", aid)
+                else:
+                    log.warning("Laps fetch failed for %s: %s", aid, e)
+                await _wait_for_cooldown(f"activity {aid} laps after error")
+                await asyncio.sleep(0.5)
+                continue
             except Exception as e:  # noqa: BLE001
                 log.warning("Laps fetch failed for %s: %s", aid, e)
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
                 continue
             if laps:
                 with engine.begin() as conn:
@@ -159,4 +226,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

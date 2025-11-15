@@ -18,6 +18,16 @@ export function formatDistance(meters: number | null | undefined): string {
   return `${km.toFixed(2)}km`;
 }
 
+export function formatPace(secondsPerKm: number | null | undefined): string {
+  if (secondsPerKm == null) return "";
+  const s = Number(secondsPerKm);
+  if (!Number.isFinite(s) || s <= 0) return "";
+  const minutes = Math.floor(s / 60);
+  const seconds = Math.round(s % 60);
+  const ss = String(seconds).padStart(2, "0");
+  return `${minutes}:${ss}/km`;
+}
+
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "";
   const s = String(iso);

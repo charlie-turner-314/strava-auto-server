@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import os
 import uuid
 import json
 import logging
+import secrets
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, status, Response, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text as sql_text
@@ -35,6 +39,18 @@ STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET", "")
 STRAVA_REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI", "")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
+
+# Simple auth (single user)
+LOGIN_USERNAME = os.getenv("APP_LOGIN_USERNAME", "admin")
+LOGIN_PASSWORD = os.getenv("APP_LOGIN_PASSWORD", "changeme")
+AUTH_SECRET = os.getenv("APP_AUTH_SECRET", "set-a-secret-value")
+SESSION_TTL_SECONDS = int(os.getenv("APP_SESSION_TTL", str(7 * 24 * 3600)))
+COOKIE_NAME = os.getenv("APP_AUTH_COOKIE_NAME", "strava_auto_auth")
+COOKIE_SECURE = os.getenv("APP_COOKIE_SECURE", "1") != "0"
+COOKIE_SAMESITE = os.getenv("APP_COOKIE_SAMESITE", "lax").lower() or "lax"
+AUTH_REQUIRED = os.getenv("APP_REQUIRE_LOGIN", "1") != "0"
+if APP_ENV == "test":
+    AUTH_REQUIRED = False
 
 # Geocoding config
 GEOCODE_PROVIDER = os.getenv("GEOCODE_PROVIDER", "nominatim").lower()
@@ -97,6 +113,75 @@ class AutomationUpdate(BaseModel):
     effects: Optional[List[Effect]] = None
 
 
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponseModel(BaseModel):
+    authenticated: bool
+    username: Optional[str] = None
+
+
+def _canonical_samesite(value: str) -> str:
+    if value.lower() in {"lax", "strict", "none"}:
+        return value.lower()
+    return "lax"
+
+
+COOKIE_SAMESITE = _canonical_samesite(COOKIE_SAMESITE)
+
+
+def _issue_session(username: str) -> Tuple[str, int]:
+    issued_at = int(time.time())
+    nonce = secrets.token_hex(16)
+    payload = f"{username}:{issued_at}:{nonce}"
+    sig = hmac.new(AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    token = base64.urlsafe_b64encode(f"{payload}:{sig}".encode("utf-8")).decode("ascii")
+    return token, issued_at
+
+
+def _verify_session_token(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
+        parts = raw.split(":")
+        if len(parts) != 4:
+            return None
+        username, issued_at_raw, nonce, sig = parts
+        payload = f"{username}:{issued_at_raw}:{nonce}"
+        expected = hmac.new(AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        issued_at = int(issued_at_raw)
+        if SESSION_TTL_SECONDS > 0:
+            now = int(time.time())
+            if now - issued_at > SESSION_TTL_SECONDS:
+                return None
+        if username != LOGIN_USERNAME:
+            return None
+        return username
+    except Exception:
+        return None
+
+
+def _set_auth_cookie(
+    response: Response,
+    token: str,
+) -> None:
+    max_age = SESSION_TTL_SECONDS if SESSION_TTL_SECONDS > 0 else None
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        max_age=max_age,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="none" if COOKIE_SAMESITE == "none" else COOKIE_SAMESITE,
+        path="/",
+    )
+
+
 # -----------------------------------------------------------------------------
 # FastAPI app
 # -----------------------------------------------------------------------------
@@ -115,6 +200,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+AUTH_EXEMPT_PATHS = {
+    "/api/login",
+    "/api/logout",
+    "/api/session",
+}
+
+
+@app.middleware("http")
+async def _auth_guard(request: Request, call_next):
+    if not AUTH_REQUIRED:
+        return await call_next(request)
+    path = request.url.path
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    if path in AUTH_EXEMPT_PATHS:
+        return await call_next(request)
+    token = request.cookies.get(COOKIE_NAME)
+    username = _verify_session_token(token)
+    if not username:
+        return JSONResponse({"detail": "Authentication required"}, status_code=status.HTTP_401_UNAUTHORIZED)
+    request.state.authenticated_user = username
+    response = await call_next(request)
+    if SESSION_TTL_SECONDS > 0:
+        refreshed, _ = _issue_session(username)
+        _set_auth_cookie(response, refreshed)
+    return response
 
 
 @app.on_event("startup")
@@ -185,6 +299,36 @@ def healthz() -> Dict[str, Any]:
             "has_redirect_uri": bool(STRAVA_REDIRECT_URI),
         },
     }
+
+
+# -----------------------------------------------------------------------------
+# Simple login endpoints
+# -----------------------------------------------------------------------------
+
+
+@app.post("/api/login", response_model=LoginResponseModel)
+def login(payload: LoginPayload, response: Response) -> LoginResponseModel:
+    if payload.username != LOGIN_USERNAME or payload.password != LOGIN_PASSWORD:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    token, _ = _issue_session(LOGIN_USERNAME)
+    _set_auth_cookie(response, token)
+    return LoginResponseModel(authenticated=True, username=LOGIN_USERNAME)
+
+
+@app.post("/api/logout", response_model=LoginResponseModel)
+def logout(response: Response) -> LoginResponseModel:
+    response.delete_cookie(COOKIE_NAME, path="/")
+    return LoginResponseModel(authenticated=False, username=None)
+
+
+@app.get("/api/session", response_model=LoginResponseModel)
+def session_status(request: Request, response: Response) -> LoginResponseModel:
+    username = _verify_session_token(request.cookies.get(COOKIE_NAME))
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    token, _ = _issue_session(username)
+    _set_auth_cookie(response, token)
+    return LoginResponseModel(authenticated=True, username=username)
 
 
 # -----------------------------------------------------------------------------
@@ -1228,6 +1372,79 @@ def get_activity_audit(activity_id: int, limit: int = Query(20, ge=1, le=200)) -
         for r in rows
     ]
     return {"items": items}
+
+# -----------------------------------------------------------------------------
+# Gear statistics
+# -----------------------------------------------------------------------------
+
+
+@app.get("/api/gear/shoes")
+def get_shoe_stats() -> Dict[str, Any]:
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                sql_text(
+                    """
+                    SELECT
+                        g.id AS gear_id,
+                        g.name AS gear_name,
+                        g.is_primary AS is_primary,
+                        g.distance AS lifetime_distance,
+                        COUNT(a.id) AS activity_count,
+                        SUM(a.distance) AS sum_distance,
+                        SUM(a.moving_time) AS sum_moving_time,
+                        AVG(a.avg_cadence) AS avg_cadence,
+                        MIN(a.start_date) AS first_activity_at,
+                        MAX(a.start_date) AS last_activity_at
+                    FROM gear g
+                    LEFT JOIN activities a ON a.gear_id = g.id
+                    WHERE g.type = 'shoe'
+                    GROUP BY g.id, g.name, g.is_primary, g.distance
+                    ORDER BY COALESCE(SUM(a.distance), 0) DESC, g.name
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        total_distance = float(row.get("sum_distance") or 0)
+        total_moving_time = float(row.get("sum_moving_time") or 0)
+        avg_pace: Optional[float]
+        if total_distance > 0 and total_moving_time > 0:
+            avg_pace = total_moving_time / (total_distance / 1000.0)
+        else:
+            avg_pace = None
+
+        items.append(
+            {
+                "gear_id": str(row.get("gear_id")),
+                "name": str(row.get("gear_name") or ""),
+                "is_primary": bool(row.get("is_primary")),
+                "lifetime_distance": (
+                    float(row.get("lifetime_distance"))
+                    if row.get("lifetime_distance") is not None
+                    else None
+                ),
+                "activity_count": int(row.get("activity_count") or 0),
+                "total_distance": total_distance,
+                "total_moving_time": total_moving_time,
+                "avg_cadence": (
+                    float(row.get("avg_cadence"))
+                    if row.get("avg_cadence") is not None
+                    else None
+                ),
+                "avg_pace_s_per_km": avg_pace,
+                "first_activity_at": row.get("first_activity_at"),
+                "last_activity_at": row.get("last_activity_at"),
+            }
+        )
+
+    return {"items": items}
+
+
 # -----------------------------------------------------------------------------
 # Athlete gear (shoes/bikes)
 # -----------------------------------------------------------------------------

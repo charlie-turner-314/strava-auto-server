@@ -679,11 +679,14 @@ async def refresh_activity_detail(
     workout_type_val = detail.get("workout_type")
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    sets: list[str] = ["updated_at = :now", "raw_json = :raw_json"]
+    base_assignments = ["updated_at = :now", "raw_json = :raw_json", "detail_json = :detail_json"]
+    base_assignment_set = set(base_assignments)
+    sets: list[str] = list(base_assignments)
     params: Dict[str, Any] = {
         "id": activity_id,
         "now": now_iso,
         "raw_json": _canonical_json(detail),
+        "detail_json": _canonical_json(detail),
     }
 
     def _assign(column: str, value: Any, *, boolean: bool = False) -> None:
@@ -719,7 +722,8 @@ async def refresh_activity_detail(
     with engine.begin() as conn:
         conn.execute(sql_text(update_sql), params)
 
-    changed = len(sets) > 2
+    changed_assignments = [s for s in sets if s not in base_assignment_set]
+    changed = bool(changed_assignments)
     if changed:
         message = "Activity refreshed from Strava"
     else:
@@ -729,11 +733,7 @@ async def refresh_activity_detail(
         "updated": changed,
         "activity_id": activity_id,
         "message": message,
-        "applied_fields": [
-            s.split(" = ")[0]
-            for s in sets
-            if s not in {"updated_at = :now", "raw_json = :raw_json"}
-        ],
+        "applied_fields": [s.split(" = ")[0] for s in changed_assignments],
     }
 
 

@@ -16,6 +16,9 @@ class TestMainEndpoints(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, 'test.db')
         os.environ['DATABASE_URL'] = f'sqlite:///{self.db_path}'
         os.environ['APP_ENV'] = 'prod'
+        os.environ['APP_LOGIN_USERNAME'] = 'admin'
+        os.environ['APP_LOGIN_PASSWORD'] = 'changeme'
+        os.environ['APP_AUTH_SECRET'] = 'test-secret'
         # Fresh import
         from api import db  # type: ignore
         db._engine = None  # type: ignore[attr-defined]
@@ -29,6 +32,9 @@ class TestMainEndpoints(unittest.TestCase):
         main.start_scheduler = fake_start_scheduler  # type: ignore[attr-defined]
         self.client = TestClient(main.app)
         self.client.__enter__()
+        # Authenticate once for protected API calls
+        login_resp = self.client.post('/api/login', json={'username': 'admin', 'password': 'changeme'})
+        assert login_resp.status_code == 200, login_resp.text
         self.main = main
 
     def tearDown(self):
@@ -135,3 +141,153 @@ class TestMainEndpoints(unittest.TestCase):
         self.assertEqual(len(data['intervals']), 1440)
         self.assertEqual(data['total_samples'], 1)
         self.assertIn('fallback', data)
+
+    def test_get_shoe_stats(self):
+        now = datetime.now(timezone.utc)
+        with self.main.engine.begin() as conn:
+            conn.execute(sql_text("DELETE FROM activities"))
+            conn.execute(sql_text("DELETE FROM gear"))
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO gear (id, name, type, is_primary, distance, created_at, updated_at)
+                    VALUES (:id, :name, :type, :is_primary, :distance, :created, :updated)
+                    """
+                ),
+                {
+                    "id": "shoe-1",
+                    "name": "Tempo Next",
+                    "type": "shoe",
+                    "is_primary": 1,
+                    "distance": 90000.0,
+                    "created": now.isoformat(),
+                    "updated": now.isoformat(),
+                },
+            )
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO gear (id, name, type, is_primary, distance, created_at, updated_at)
+                    VALUES (:id, :name, :type, :is_primary, :distance, :created, :updated)
+                    """
+                ),
+                {
+                    "id": "shoe-2",
+                    "name": "Daily Trainer",
+                    "type": "shoe",
+                    "is_primary": 0,
+                    "distance": 12000.0,
+                    "created": now.isoformat(),
+                    "updated": now.isoformat(),
+                },
+            )
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO activities (
+                        id, start_date, start_date_local, sport_type, name,
+                        distance, moving_time, elapsed_time, total_elevation_gain,
+                        avg_cadence, raw_json, updated_at, gear_id
+                    )
+                    VALUES (:id, :start_date, :start_date_local, :sport_type, :name,
+                            :distance, :moving_time, :elapsed_time, :gain,
+                            :avg_cadence, :raw_json, :updated_at, :gear_id)
+                    """
+                ),
+                {
+                    "id": 101,
+                    "start_date": now.isoformat(),
+                    "start_date_local": now.isoformat(),
+                    "sport_type": "Run",
+                    "name": "Long Run",
+                    "distance": 10000.0,
+                    "moving_time": 3600,
+                    "elapsed_time": 3660,
+                    "gain": 120.0,
+                    "avg_cadence": 80.0,
+                    "raw_json": "{}",
+                    "updated_at": now.isoformat(),
+                    "gear_id": "shoe-1",
+                },
+            )
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO activities (
+                        id, start_date, start_date_local, sport_type, name,
+                        distance, moving_time, elapsed_time, total_elevation_gain,
+                        avg_cadence, raw_json, updated_at, gear_id
+                    )
+                    VALUES (:id, :start_date, :start_date_local, :sport_type, :name,
+                            :distance, :moving_time, :elapsed_time, :gain,
+                            :avg_cadence, :raw_json, :updated_at, :gear_id)
+                    """
+                ),
+                {
+                    "id": 102,
+                    "start_date": now.isoformat(),
+                    "start_date_local": now.isoformat(),
+                    "sport_type": "Run",
+                    "name": "Tempo",
+                    "distance": 5000.0,
+                    "moving_time": 1500,
+                    "elapsed_time": 1520,
+                    "gain": 40.0,
+                    "avg_cadence": 90.0,
+                    "raw_json": "{}",
+                    "updated_at": now.isoformat(),
+                    "gear_id": "shoe-1",
+                },
+            )
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO activities (
+                        id, start_date, start_date_local, sport_type, name,
+                        distance, moving_time, elapsed_time, total_elevation_gain,
+                        avg_cadence, raw_json, updated_at, gear_id
+                    )
+                    VALUES (:id, :start_date, :start_date_local, :sport_type, :name,
+                            :distance, :moving_time, :elapsed_time, :gain,
+                            :avg_cadence, :raw_json, :updated_at, :gear_id)
+                    """
+                ),
+                {
+                    "id": 103,
+                    "start_date": now.isoformat(),
+                    "start_date_local": now.isoformat(),
+                    "sport_type": "Run",
+                    "name": "Recovery",
+                    "distance": 8000.0,
+                    "moving_time": 2400,
+                    "elapsed_time": 2420,
+                    "gain": 30.0,
+                    "avg_cadence": 82.0,
+                    "raw_json": "{}",
+                    "updated_at": now.isoformat(),
+                    "gear_id": "shoe-2",
+                },
+            )
+
+        response = self.client.get('/api/gear/shoes')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn('items', payload)
+        shoes = {item['gear_id']: item for item in payload['items']}
+        self.assertIn('shoe-1', shoes)
+        self.assertIn('shoe-2', shoes)
+
+        first = shoes['shoe-1']
+        self.assertEqual(first['activity_count'], 2)
+        self.assertAlmostEqual(first['total_distance'], 15000.0, places=3)
+        self.assertAlmostEqual(first['total_moving_time'], 5100.0, places=3)
+        self.assertAlmostEqual(first['avg_cadence'], 85.0, places=3)
+        self.assertAlmostEqual(first['avg_pace_s_per_km'], 340.0, places=3)
+        self.assertTrue(first['is_primary'])
+        self.assertEqual(first['lifetime_distance'], 90000.0)
+
+        second = shoes['shoe-2']
+        self.assertEqual(second['activity_count'], 1)
+        self.assertAlmostEqual(second['total_distance'], 8000.0, places=3)
+        self.assertAlmostEqual(second['avg_cadence'], 82.0, places=3)
+        self.assertFalse(second['is_primary'])

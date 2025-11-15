@@ -78,7 +78,7 @@ class SchedulerRefreshTests(unittest.IsolatedAsyncioTestCase):
         with self.engine.connect() as conn:
             row = conn.execute(
                 sql_text(
-                    "SELECT distance, moving_time, commute, gear_id, hide_from_home FROM activities WHERE id = :id"
+                    "SELECT distance, moving_time, commute, gear_id, hide_from_home, detail_json, raw_json FROM activities WHERE id = :id"
                 ),
                 {"id": 123},
             ).fetchone()
@@ -88,6 +88,9 @@ class SchedulerRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row.commute, 1)
         self.assertEqual(row.gear_id, "gear123")
         self.assertEqual(row.hide_from_home, 0)
+        self.assertIsNotNone(row.detail_json)
+        self.assertTrue(row.detail_json.strip().startswith("{"))
+        self.assertEqual(row.raw_json, row.detail_json)
 
     async def test_refresh_respects_cooldown(self) -> None:
         now = int(time.time())
