@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { applyActivity, getActivities, previewActivity, getAutomations, type Automation, reverseGeocode } from '../lib/api'
+import { applyActivity, getActivities, previewActivity, getAutomations, type Automation, reverseGeocode, type Activity, type ActivityPreview } from '../lib/api'
 import { formatDateTime, formatDistance, formatDuration } from '../lib/format'
 
 const PAGE_SIZE = 10
+type ActivityWithCoords = Activity & { start_lat?: number | null; start_lng?: number | null; end_lat?: number | null; end_lng?: number | null }
 
 export function ApplyAutomations() {
   const qc = useQueryClient()
@@ -55,10 +56,10 @@ export function ApplyAutomations() {
             </tr>
           </thead>
           <tbody>
-            {items.map(a => (
+            {items.map((a) => (
               <Row
                 key={a.id}
-                activity={a}
+                activity={a as ActivityWithCoords}
                 onChanged={() => qc.invalidateQueries({ queryKey: ['apply-activities'] })}
                 selectedAutomationId={selectedAutoId || null}
               />
@@ -70,17 +71,18 @@ export function ApplyAutomations() {
   )
 }
 
-function Row({ activity, onChanged, selectedAutomationId }: { activity: any; onChanged: () => void; selectedAutomationId: string | null }) {
+function Row({ activity, onChanged, selectedAutomationId }: { activity: ActivityWithCoords; onChanged: () => void; selectedAutomationId: string | null }) {
   const [open, setOpen] = useState(false)
-  const prev = useQuery({
+  const prev = useQuery<ActivityPreview>({
     queryKey: ['apply-preview', activity.id, open, selectedAutomationId],
     queryFn: () => previewActivity(activity.id),
     enabled: open || !!selectedAutomationId,
   })
   const [applying, setApplying] = useState(false)
   const applies = prev.data?.applies
+  const matchedAutomations = prev.data?.matched_automations ?? []
   const matchesSelected = selectedAutomationId
-    ? (prev.data?.matched_automations || []).some((m: any) => m.id === selectedAutomationId)
+    ? matchedAutomations.some((m) => m.id === selectedAutomationId)
     : true
 
   // When a specific automation is selected, hide rows that do not match/apply
@@ -127,7 +129,7 @@ function Row({ activity, onChanged, selectedAutomationId }: { activity: any; onC
                     <div style={{ color: 'var(--muted-weak)' }}>None</div>
                   ) : (
                     <ul>
-                      {prev.data.matched_automations.map((m: any) => (
+                      {prev.data.matched_automations.map((m) => (
                         <li key={m.id}><code>{m.name}</code></li>
                       ))}
                     </ul>
@@ -168,7 +170,7 @@ function Row({ activity, onChanged, selectedAutomationId }: { activity: any; onC
 
 export default ApplyAutomations
 
-function ActivityCoords({ activity }: { activity: any }) {
+function ActivityCoords({ activity }: { activity: ActivityWithCoords }) {
   const hasStart = Number.isFinite(activity.start_lat) && Number.isFinite(activity.start_lng)
   const hasEnd = Number.isFinite(activity.end_lat) && Number.isFinite(activity.end_lng)
   const startRQ = useQuery({

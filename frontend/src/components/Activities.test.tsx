@@ -4,11 +4,12 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Activities } from './Activities'
+import type { Activity } from '../lib/api'
 
 const API = 'http://localhost:8000'
 
-function makeItems(offset: number, limit: number) {
-  const items = [] as any[]
+function makeItems(offset: number, limit: number): Activity[] {
+  const items: Activity[] = []
   for (let i = 0; i < limit; i++) {
     const id = offset + i + 1
     items.push({
@@ -61,4 +62,3 @@ it('paginates activities and formats values', async () => {
   await userEvent.click(screen.getByRole('button', { name: /Prev/i }))
   expect(await screen.findByText('Activity 1')).toBeTruthy()
 })
-

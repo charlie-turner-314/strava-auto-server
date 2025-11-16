@@ -172,6 +172,7 @@ export function StravaConnect() {
 
 export default StravaConnect
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function usePollingChartData(profile: PollingProfile | undefined, nowMinute: number): PollingChartData | null {
   return useMemo(() => buildPollingChartData(profile, nowMinute), [profile, nowMinute])
 }
@@ -183,6 +184,7 @@ export type PollingChartData = {
   xTickInterval: number
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function buildPollingChartData(profile: PollingProfile | undefined, nowMinute: number): PollingChartData | null {
   if (!profile || !Array.isArray(profile.intervals) || profile.intervals.length === 0) {
     return null
@@ -201,9 +203,10 @@ export function buildPollingChartData(profile: PollingProfile | undefined, nowMi
   if (!reduced.length) reduced.push(allPoints[0])
 
   if (!reduced.some((pt) => pt.minute === nowMinute)) {
-    const fallbackValue = allPoints[nowMinute]?.interval
-      ?? Number(profile.fallback)
-      ?? reduced[0].interval
+    const candidate = allPoints[nowMinute]?.interval
+    const fallbackValue = (typeof candidate === 'number' && Number.isFinite(candidate))
+      ? candidate
+      : (Number(profile.fallback) || reduced[0].interval)
     reduced.push({ minute: nowMinute, interval: fallbackValue })
   }
   reduced.sort((a, b) => a.minute - b.minute)
@@ -220,6 +223,7 @@ export function buildPollingChartData(profile: PollingProfile | undefined, nowMi
   }
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function formatSeconds(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return `${Math.round(sec)}s`
   if (sec < 120) return `${Math.round(sec)}s`
@@ -227,6 +231,7 @@ export function formatSeconds(sec: number): string {
   return minutes % 1 === 0 ? `${minutes} min` : `${minutes.toFixed(1)} min`
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function minuteToLabel(minute: number): string {
   const m = Math.max(0, minute) % 1440
   const h = Math.floor(m / 60)

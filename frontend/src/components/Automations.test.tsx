@@ -1,21 +1,13 @@
-import { render, screen, within, waitForElementToBeRemoved } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Automations } from './Automations'
+import type { Automation, AutomationCreate } from '../lib/api'
 
 // In-memory store simulating backend
-type Auto = {
-  id: string
-  name: string
-  enabled: boolean
-  priority: number
-  conditions: any[]
-  effects: any[]
-  created_at: string
-  updated_at: string
-}
+type Auto = Automation
 
 let store: Auto[] = []
 let deleted = false
@@ -26,7 +18,7 @@ const server = setupServer(
     return HttpResponse.json(store)
   }),
   http.post(`${API}/api/automations`, async ({ request }) => {
-    const body = (await request.json()) as any
+    const body = (await request.json()) as AutomationCreate
     const now = new Date().toISOString()
     const created: Auto = {
       id: 'a1',
@@ -42,13 +34,13 @@ const server = setupServer(
     return HttpResponse.json(created, { status: 201 })
   }),
   http.patch(`${API}/api/automations/:id/enabled`, async ({ params, request }) => {
-    const { id } = params as any
-    const body = (await request.json()) as any
+    const id = typeof params.id === 'string' ? params.id : ''
+    const body = (await request.json()) as { enabled?: boolean }
     store = store.map((a) => (a.id === id ? { ...a, enabled: Boolean(body.enabled) } : a))
     return HttpResponse.json({ id, enabled: Boolean(body.enabled) })
   }),
   http.delete(`${API}/api/automations/:id`, ({ params }) => {
-    const { id } = params as any
+    const id = typeof params.id === 'string' ? params.id : ''
     store = store.filter((a) => a.id !== id)
     deleted = true
     return new HttpResponse(null, { status: 204 })
@@ -81,7 +73,6 @@ it('shows empty state and can create, toggle, delete an automation', async () =>
   const tr = row.closest('tr')!
   expect(tr).toBeTruthy()
   // Toggle enable off
-  const enabledCell = within(tr).getByLabelText(/On|Off/i)?.closest('label') || tr
   const checkbox = within(tr).getByRole('checkbox')
   expect((checkbox as HTMLInputElement).checked).toBe(true)
   await userEvent.click(checkbox)

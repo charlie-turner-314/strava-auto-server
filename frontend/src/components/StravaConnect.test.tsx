@@ -33,7 +33,7 @@ describe('usePollingChartData / buildPollingChartData', () => {
 
   it('uses fallback when intervals are invalid', () => {
     const profile: PollingProfile = {
-      intervals: Array.from({ length: 1440 }, (_, i) => (i % 2 === 0 ? 'bad' : 90) as any),
+      intervals: Array.from({ length: 1440 }, (_, i) => (i % 2 === 0 ? ('bad' as unknown as number) : 90)),
       fallback: 90,
       total_samples: 5,
       computed_at: undefined,

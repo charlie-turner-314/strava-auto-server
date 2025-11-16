@@ -1,11 +1,13 @@
 import type { Condition, Effect, Activity } from './api'
 
+type ActivityWithDescription = Activity & { description?: string | null }
+
 export function evaluateConditions(conditions: Condition[], activity: Activity): boolean {
   // Supports types: sport_type, distance, moving_time, total_elevation_gain, title
   return conditions.every((c) => {
-    const op = (c as any).op as string
+    const op = c.op
     const type = c.type
-    const val = (c as any).value
+    const val = c.value
     switch (type) {
       case 'sport_type':
         return op === 'equals' ? (activity.sport_type || '') === String(val) : true
@@ -36,8 +38,8 @@ export function evaluateConditions(conditions: Condition[], activity: Activity):
         const names = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
         const dayName = names[jsDay]
         const arr = Array.isArray(val) ? val : [val]
-        const normalized = arr.map((x: any) => String(x)).map((s: string) => s.trim())
-        const match = normalized.some((s: string) => {
+        const normalized = arr.map((x) => String(x)).map((s) => s.trim())
+        const match = normalized.some((s) => {
           if (s === '') return false
           if (/^\d+$/.test(s)) {
             // numeric: 0=Mon..6=Sun per backend; map to JS weekday names
@@ -60,7 +62,7 @@ export function evaluateConditions(conditions: Condition[], activity: Activity):
 
 function compareNum(actual: number | null | undefined, op: string, target: unknown): boolean {
   const a = Number(actual ?? 0)
-  const t = Number(target as any)
+  const t = Number(target ?? 0)
   if (Number.isNaN(t)) return false
   switch (op) {
     case 'gt':
@@ -92,41 +94,43 @@ export function previewEffects(effects: Effect[], activity: Activity): EffectPre
   let name = activity.name ?? ''
   let sport_type = activity.sport_type ?? null
   let commute: boolean | null = null
-  let gear_id: string | null = (activity as any).gear_id ?? null
-  let description: string | null = (activity as any).description ?? null
+  let gear_id: string | null = activity.gear_id ?? null
+  const actWithDesc = activity as ActivityWithDescription
+  let description: string | null = actWithDesc.description ?? null
   let hide_from_home: boolean | null = null
   const tagSet = new Set<string>()
   for (const e of effects) {
+    const params = (e.params ?? {}) as Record<string, unknown>
     switch (e.type) {
       case 'set_title_suffix': {
-        const suffix = (e as any).params?.suffix ?? ''
+        const suffix = typeof params.suffix === 'string' ? params.suffix : ''
         name = `${name}${suffix}`
         break
       }
       case 'set_title_prefix': {
-        const prefix = (e as any).params?.prefix ?? ''
+        const prefix = typeof params.prefix === 'string' ? params.prefix : ''
         name = `${prefix}${name}`
         break
       }
       case 'set_commute': {
-        const c = (e as any).params?.commute
-        commute = Boolean(c ?? true)
+        const c = params.commute
+        commute = typeof c === 'boolean' ? c : Boolean(c ?? true)
         if (commute) tagSet.add('Commute')
         break
       }
       case 'set_sport_type': {
-        const st = (e as any).params?.sport_type
+        const st = params.sport_type
         sport_type = String(st || sport_type || '')
         break
       }
       case 'set_title_template': {
-        const tpl = (e as any).params?.template
+        const tpl = params.template
         // Client preview cannot increment server-side counters; show template as-is
         name = String(tpl || name)
         break
       }
       case 'set_shoes_by_id': {
-        const gid = (e as any).params?.gear_id
+        const gid = params.gear_id
         gear_id = gid ? String(gid) : gear_id
         break
       }
@@ -135,14 +139,13 @@ export function previewEffects(effects: Effect[], activity: Activity): EffectPre
         break
       }
       case 'hide_from_feeds': {
-        const params = (e as any).params ?? {}
-        const home = params.home ?? true
-        hide_from_home = Boolean(home)
+        const home = typeof params.home === 'boolean' ? params.home : Boolean(params.home ?? true)
+        hide_from_home = home
         if (hide_from_home) tagSet.add('Hidden from feeds')
         break
       }
       case 'set_description': {
-        const text = (e as any).params?.text
+        const text = params.text
         description = text != null ? String(text) : ''
         break
       }

@@ -25,8 +25,9 @@ export function LoginForm({ onSuccess }: Props) {
         return
       }
       setError('Invalid credentials')
-    } catch (err: any) {
-      setError(err?.message || 'Login failed')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Login failed'
+      setError(message)
     } finally {
       setBusy(false)
     }

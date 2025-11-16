@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createAutomation, deleteAutomation, getAutomations, setAutomationEnabled, updateAutomation, type Automation, type AutomationCreate, type Condition as CondType, type Effect as EffType } from '../lib/api'
+import { createAutomation, deleteAutomation, getAutomations, setAutomationEnabled, updateAutomation, getAthleteGear, geocode, type Activity, type Automation, type AutomationCreate, type Condition as CondType, type Effect as EffType, type GearItem } from '../lib/api'
 import { useMemo, useState } from 'react'
-import { CONDITION_SPECS, conditionFrom, conditionFromSelection, effectFromSelection, type ConditionKind, type ConditionOp, type EffectKind } from '../lib/builder'
+import { CONDITION_SPECS, conditionFrom, effectFromSelection, type ConditionKind, type ConditionOp, type EffectKind } from '../lib/builder'
 import { evaluateConditions, previewEffects } from '../lib/eval'
 
 const CONDITION_LABELS: Record<string, string> = Object.fromEntries(
@@ -64,16 +64,17 @@ export function Automations() {
           if (!Array.isArray(parsedConditions) || !Array.isArray(parsedEffects)) {
             throw new Error('conditions/effects must be arrays')
           }
-        } catch (e: any) {
-          throw new Error(`Invalid JSON: ${e.message}`)
+        } catch (e) {
+          const message = e instanceof Error ? e.message : 'Unknown error'
+          throw new Error(`Invalid JSON: ${message}`)
         }
       }
       const payload: AutomationCreate = {
         name: name.trim(),
         enabled,
         priority: Number.isFinite(priority) ? priority : 0,
-        conditions: parsedConditions as any[],
-        effects: parsedEffects as any[],
+        conditions: parsedConditions as CondType[],
+        effects: parsedEffects as EffType[],
       }
       if (!payload.name) throw new Error('Name is required')
       if (editingId) return updateAutomation(editingId, payload)
@@ -90,14 +91,14 @@ export function Automations() {
       setEditingId(null)
       qc.invalidateQueries({ queryKey: ['automations'] })
     },
-    onError: (e: any) => setError(e?.message || 'Save failed'),
+    onError: (e) => setError(e instanceof Error ? e.message : 'Save failed'),
   })
 
   const delMut = useMutation({
     mutationFn: (id: string) => deleteAutomation(id),
     onSuccess: (_data, id) => {
       // Optimistically update cache for snappy UI, also invalidate to stay correct
-      qc.setQueryData(['automations'], (old: any) => Array.isArray(old) ? old.filter((a) => a.id !== id) : old)
+      qc.setQueryData<Automation[] | undefined>(['automations'], (old) => Array.isArray(old) ? old.filter((a) => a.id !== id) : old)
       qc.invalidateQueries({ queryKey: ['automations'] })
     },
   })
@@ -134,7 +135,7 @@ export function Automations() {
               <tr key={a.id}>
                 <td style={{ borderTop: '1px solid #eee' }}>{a.name}</td>
                 <td style={{ borderTop: '1px solid #eee' }}>
-                  <EnabledToggle id={a.id} enabled={a.enabled} onChange={async (next) => {
+                  <EnabledToggle enabled={a.enabled} onChange={async (next) => {
                     await setAutomationEnabled(a.id, next)
                     qc.invalidateQueries({ queryKey: ['automations'] })
                   }} />
@@ -236,16 +237,15 @@ function DayMultiSelect({ value, onChange }: { value: string[]; onChange: (v: st
   )
 }
 
-import { getAthleteGear, geocode } from '../lib/api'
 function ShoesSelect({ onSelect }: { onSelect: (gear_id: string) => void }) {
   const q = useQuery({ queryKey: ['athlete-gear'], queryFn: getAthleteGear })
   if (q.isLoading) return <span>Loading shoes…</span>
   if (q.isError) return <span style={{ color: 'crimson' }}>Failed to load shoes</span>
-  const shoes = q.data?.shoes || []
+  const shoes: GearItem[] = q.data?.shoes ?? []
   return (
     <select onChange={(e) => onSelect(e.target.value)} defaultValue="">
       <option value="" disabled>Select shoes…</option>
-      {shoes.map((s: any) => (
+      {shoes.map((s) => (
         <option key={s.id} value={s.id}>
           {s.name}{s.primary ? ' (primary)' : ''}
         </option>
@@ -501,7 +501,7 @@ function BuilderEffects({ value, onChange }: { value: EffType[]; onChange: (v: E
   )
 }
 
-function EnabledToggle({ id, enabled, onChange }: { id: string; enabled: boolean; onChange: (next: boolean) => void | Promise<void> }) {
+function EnabledToggle({ enabled, onChange }: { enabled: boolean; onChange: (next: boolean) => void | Promise<void> }) {
   const [pending, setPending] = useState(false)
   return (
     <label style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
@@ -536,6 +536,8 @@ type SampleForm = {
   description: string
   gearId: string
 }
+
+type PreviewActivity = Activity & { start_lat?: number | null; start_lng?: number | null; end_lat?: number | null; end_lng?: number | null }
 
 function PreviewPanel({ conditions, effects }: { conditions: CondType[]; effects: EffType[] }) {
   const [sample, setSample] = useState<SampleForm>({
@@ -572,7 +574,7 @@ function PreviewPanel({ conditions, effects }: { conditions: CondType[]; effects
       const n = Number(val)
       return Number.isFinite(n) ? n : null
     }
-    const base: any = {
+    const base: PreviewActivity = {
       id: 1,
       name: sample.name || '',
       sport_type: sample.sportType || null,
@@ -745,17 +747,17 @@ function describeConditionType(c: CondType): string {
 }
 
 function formatConditionValue(c: CondType): string {
-  const value = (c as any).value
+  const value = c.value
   if (value === undefined || value === null || (Array.isArray(value) && value.length === 0)) {
     return '—'
   }
   if (Array.isArray(value)) {
     return value.join(', ')
   }
-  if (typeof value === 'object') {
-    const maybe = value as any
+  if (typeof value === 'object' && value !== null) {
+    const maybe = value as { lat?: unknown; lon?: unknown; radius_m?: unknown; radius?: unknown }
     if (typeof maybe.lat === 'number' && typeof maybe.lon === 'number') {
-      const radius = typeof maybe.radius_m === 'number' ? maybe.radius_m : maybe.radius
+      const radius = typeof maybe.radius_m === 'number' ? maybe.radius_m : typeof maybe.radius === 'number' ? maybe.radius : null
       const lat = Number.isFinite(maybe.lat) ? maybe.lat.toFixed(4) : String(maybe.lat)
       const lon = Number.isFinite(maybe.lon) ? maybe.lon.toFixed(4) : String(maybe.lon)
       const radiusText = radius != null && Number.isFinite(radius) ? `${radius}m` : '?'
@@ -774,24 +776,32 @@ function describeEffectType(e: EffType): string {
 }
 
 function formatEffectValue(e: EffType): string {
-  const params = (e as any).params ?? {}
+  const params = (e.params ?? {}) as Record<string, unknown>
+  const stringParam = (key: string) => {
+    const val = params[key]
+    return typeof val === 'string' ? val : ''
+  }
+  const booleanParam = (key: string, fallback: boolean) => {
+    const val = params[key]
+    return typeof val === 'boolean' ? val : fallback
+  }
   switch (e.type) {
     case 'set_title_suffix':
-      return params.suffix ? `suffix: ${params.suffix}` : 'suffix: (empty)'
+      return stringParam('suffix') ? `suffix: ${stringParam('suffix')}` : 'suffix: (empty)'
     case 'set_title_prefix':
-      return params.prefix ? `prefix: ${params.prefix}` : 'prefix: (empty)'
+      return stringParam('prefix') ? `prefix: ${stringParam('prefix')}` : 'prefix: (empty)'
     case 'set_title_template':
-      return params.template ? `template: ${params.template}` : 'template: (empty)'
+      return stringParam('template') ? `template: ${stringParam('template')}` : 'template: (empty)'
     case 'set_sport_type':
-      return params.sport_type ? `sport_type: ${params.sport_type}` : 'sport_type: (empty)'
+      return stringParam('sport_type') ? `sport_type: ${stringParam('sport_type')}` : 'sport_type: (empty)'
     case 'set_commute':
-      return `commute: ${params.commute ?? true}`
+      return `commute: ${booleanParam('commute', true)}`
     case 'set_shoes_by_id':
-      return params.gear_id ? `gear_id: ${params.gear_id}` : 'gear_id: (empty)'
+      return stringParam('gear_id') ? `gear_id: ${stringParam('gear_id')}` : 'gear_id: (empty)'
     case 'hide_from_feeds':
-      return `home: ${params.home ?? true}, clubs: ${params.clubs ?? true}`
+      return `home: ${booleanParam('home', true)}, clubs: ${booleanParam('clubs', true)}`
     case 'set_description':
-      return params.text ? `description: ${params.text}` : 'description: (empty)'
+      return stringParam('text') ? `description: ${stringParam('text')}` : 'description: (empty)'
     case 'set_long_run_tag':
       return 'Adds Long run tag'
     default:

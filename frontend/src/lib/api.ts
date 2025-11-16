@@ -315,7 +315,7 @@ export async function resetAllCounters(): Promise<{ reset: number }> {
 }
 
 export async function reapplyCounters(dryRun = false, limit?: number): Promise<{ updated: number; skipped: number; applied_ids: number[]; dry_run: boolean }> {
-  const body: any = { dry_run: Boolean(dryRun) }
+  const body: Record<string, unknown> = { dry_run: Boolean(dryRun) }
   if (Number.isFinite(limit as number)) body.limit = Number(limit)
   return http<{ updated: number; skipped: number; applied_ids: number[]; dry_run: boolean }>(`/api/admin/reapply_counters`, {
     method: 'POST',
