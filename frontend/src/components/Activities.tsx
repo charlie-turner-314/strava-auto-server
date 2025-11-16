@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { getActivities, runIngestNow, deleteActivity, clearActivities, previewActivity, applyActivity, getActivityAudit, refreshActivity } from '../lib/api'
+import { getActivities, runIngestNow, deleteActivity, clearActivities, previewActivity, applyActivity, getActivityAudit, refreshActivity, type ActivitiesPage, type Activity } from '../lib/api'
 import { formatDateTime, formatDistance, formatDuration } from '../lib/format'
 
 const PAGE_SIZE = 10
@@ -17,15 +17,15 @@ export function Activities() {
     setToast(msg)
     window.setTimeout(() => setToast(null), 2500)
   }
-  const q = useQuery({
+  const q = useQuery<ActivitiesPage>({
     queryKey: ['activities', PAGE_SIZE, offset, sport],
     queryFn: () => getActivities(PAGE_SIZE, offset, sport || undefined),
-    keepPreviousData: true,
+    placeholderData: (prev) => prev,
     refetchInterval: 30000,
   })
 
   const total = q.data?.total ?? 0
-  const items = q.data?.items ?? []
+  const items: Activity[] = q.data?.items ?? []
   const canPrev = offset > 0
   const canNext = offset + PAGE_SIZE < total
   const [detailId, setDetailId] = useState<number | null>(null)

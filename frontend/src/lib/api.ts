@@ -69,6 +69,11 @@ export type Activity = {
   moving_time: number | null;
   elapsed_time: number | null;
   total_elevation_gain: number | null;
+  description?: string | null;
+  start_lat?: number | null;
+  start_lng?: number | null;
+  end_lat?: number | null;
+  end_lng?: number | null;
   commute?: boolean | null;
   workout_type?: number | null;
   gear_id?: string | null;

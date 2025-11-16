@@ -73,12 +73,13 @@ export type EffectKind =
   | "set_sport_type"
   | "set_long_run_tag"
   | "set_shoes_by_id"
-  | "set_title_template";
+  | "set_title_template"
+  | "set_description";
 
 export function conditionFrom(
   kind: ConditionKind,
   op: ConditionOp,
-  raw: string | string[]
+  raw: string | string[] | number[] | number
 ): Condition {
   if (kind === "sport_type") {
     return { type: "sport_type", op, value: String(raw).trim() };
@@ -96,7 +97,7 @@ export function conditionFrom(
     return { type: "day_of_week", op, value: arr };
   }
   if (kind === "moving_time" || kind === "moving_pace") {
-    const rawStr = Array.isArray(raw) ? raw[0] ?? "" : String(raw);
+    const rawStr = Array.isArray(raw) ? String(raw[0] ?? "") : String(raw);
     const secs = parseDurationSeconds(rawStr);
     const value =
       Number.isFinite(secs) && secs !== null ? secs : Number(rawStr || 0);
@@ -174,6 +175,8 @@ export function effectFromSelection(kind: EffectKind, raw: string): Effect {
         type: "set_title_template",
         params: { template: raw || "Commute #{count:commute}" },
       };
+    case "set_description":
+      return { type: "set_description", params: { text: raw } };
     default:
       throw new Error(`Unknown effect kind: ${kind}`);
   }

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { applyActivity, getActivities, previewActivity, getAutomations, type Automation, reverseGeocode, type Activity, type ActivityPreview } from '../lib/api'
+import { applyActivity, getActivities, previewActivity, getAutomations, type Automation, reverseGeocode, type Activity, type ActivityPreview, type ActivitiesPage } from '../lib/api'
 import { formatDateTime, formatDistance, formatDuration } from '../lib/format'
 
 const PAGE_SIZE = 10
@@ -11,14 +11,14 @@ export function ApplyAutomations() {
   const [offset, setOffset] = useState(0)
   const autos = useQuery({ queryKey: ['automations'], queryFn: getAutomations })
   const [selectedAutoId, setSelectedAutoId] = useState<string>('')
-  const acts = useQuery({
+  const acts = useQuery<ActivitiesPage>({
     queryKey: ['apply-activities', PAGE_SIZE, offset],
     queryFn: () => getActivities(PAGE_SIZE, offset),
-    keepPreviousData: true,
+    placeholderData: (prev) => prev,
     refetchInterval: 30000,
   })
   const total = acts.data?.total ?? 0
-  const items = acts.data?.items ?? []
+  const items: ActivityWithCoords[] = (acts.data?.items as ActivityWithCoords[]) ?? []
   const canPrev = offset > 0
   const canNext = offset + PAGE_SIZE < total
 
@@ -175,12 +175,12 @@ function ActivityCoords({ activity }: { activity: ActivityWithCoords }) {
   const hasEnd = Number.isFinite(activity.end_lat) && Number.isFinite(activity.end_lng)
   const startRQ = useQuery({
     queryKey: ['revgeo', 'start', activity.id, activity.start_lat, activity.start_lng],
-    queryFn: () => reverseGeocode(activity.start_lat, activity.start_lng),
+    queryFn: () => reverseGeocode(activity.start_lat as number, activity.start_lng as number),
     enabled: hasStart,
   })
   const endRQ = useQuery({
     queryKey: ['revgeo', 'end', activity.id, activity.end_lat, activity.end_lng],
-    queryFn: () => reverseGeocode(activity.end_lat, activity.end_lng),
+    queryFn: () => reverseGeocode(activity.end_lat as number, activity.end_lng as number),
     enabled: hasEnd,
   })
   return (
