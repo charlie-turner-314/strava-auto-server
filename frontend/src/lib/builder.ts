@@ -74,7 +74,8 @@ export type EffectKind =
   | "set_long_run_tag"
   | "set_shoes_by_id"
   | "set_title_template"
-  | "set_description";
+  | "set_description"
+  | "hide_from_feeds";
 
 export function conditionFrom(
   kind: ConditionKind,
@@ -177,6 +178,8 @@ export function effectFromSelection(kind: EffectKind, raw: string): Effect {
       };
     case "set_description":
       return { type: "set_description", params: { text: raw } };
+    case "hide_from_feeds":
+      return { type: "hide_from_feeds", params: { home: true } };
     default:
       throw new Error(`Unknown effect kind: ${kind}`);
   }

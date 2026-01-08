@@ -38,4 +38,8 @@ describe('builder mapping', () => {
     const e = effectFromSelection('set_sport_type', 'Ride')
     expect(e).toEqual({ type: 'set_sport_type', params: { sport_type: 'Ride' } })
   })
+  it('maps hide_from_feeds', () => {
+    const e = effectFromSelection('hide_from_feeds', '')
+    expect(e).toEqual({ type: 'hide_from_feeds', params: { home: true } })
+  })
 })
