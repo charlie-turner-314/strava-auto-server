@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getCounters, resetCounter, resetAllCounters, reapplyCounters } from '../lib/api'
+import { getCounters, resetCounter, resetAllCounters, reapplyCounters, setCounter } from '../lib/api'
 import { useState } from 'react'
 
 export function Counters() {
@@ -7,10 +7,18 @@ export function Counters() {
   const list = useQuery({ queryKey: ['counters'], queryFn: getCounters, refetchInterval: 15000 })
   const [limit, setLimit] = useState<string>('')
   const [dryRun, setDryRun] = useState(true)
+  const [edits, setEdits] = useState<Record<string, string>>({})
 
   const resetOne = useMutation({
     mutationFn: (key: string) => resetCounter(key),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['counters'] }),
+  })
+  const setOne = useMutation({
+    mutationFn: ({ key, value }: { key: string; value: number }) => setCounter(key, value),
+    onSuccess: (data) => {
+      setEdits((prev) => ({ ...prev, [data.key]: String(data.value) }))
+      qc.invalidateQueries({ queryKey: ['counters'] })
+    },
   })
   const resetAll = useMutation({
     mutationFn: () => resetAllCounters(),
@@ -47,27 +55,57 @@ export function Counters() {
               </button>
             </div>
           </div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+            Stored value is the last value used; next automation run will use last + 1.
+          </div>
           <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
             <thead>
               <tr>
-                <th align="left" style={{ width: '40%' }}>Key</th>
-                <th align="left" style={{ width: '40%' }}>Value</th>
-                <th align="left" style={{ width: '20%' }}>Actions</th>
+                <th align="left" style={{ width: '30%' }}>Key</th>
+                <th align="left" style={{ width: '15%' }}>Last used</th>
+                <th align="left" style={{ width: '15%' }}>Next value</th>
+                <th align="left" style={{ width: '40%' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {(list.data?.items || []).length === 0 ? (
-                <tr><td colSpan={3} style={{ color: 'var(--muted)', borderTop: '1px solid var(--border)' }}>No counters yet</td></tr>
+                <tr><td colSpan={4} style={{ color: 'var(--muted)', borderTop: '1px solid var(--border)' }}>No counters yet</td></tr>
               ) : (
-                list.data!.items.map((it) => (
+                list.data!.items.map((it) => {
+                  const rawValue = edits[it.key] ?? String(it.value)
+                  const parsedValue = Number(rawValue)
+                  const canSet = rawValue.trim() !== '' && Number.isFinite(parsedValue) && Number.isInteger(parsedValue) && parsedValue >= 0
+                  return (
                   <tr key={it.key}>
                     <td style={{ borderTop: '1px solid var(--border)' }}><code>{it.key}</code></td>
                     <td style={{ borderTop: '1px solid var(--border)' }}>{it.value}</td>
+                    <td style={{ borderTop: '1px solid var(--border)' }}>{it.value + 1}</td>
                     <td style={{ borderTop: '1px solid var(--border)' }}>
-                      <button onClick={() => resetOne.mutate(it.key)} disabled={resetOne.isPending}>Reset</button>
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={rawValue}
+                          onChange={(e) => setEdits((prev) => ({ ...prev, [it.key]: e.target.value }))}
+                          style={{ width: 110 }}
+                          placeholder="Last used"
+                          aria-label={`Set ${it.key} counter value`}
+                        />
+                        <button
+                          onClick={() => {
+                            if (!canSet) return
+                            setOne.mutate({ key: it.key, value: parsedValue })
+                          }}
+                          disabled={setOne.isPending || !canSet}
+                        >
+                          Set
+                        </button>
+                        <button onClick={() => resetOne.mutate(it.key)} disabled={resetOne.isPending}>Reset</button>
+                      </div>
                     </td>
                   </tr>
-                ))
+                )})
               )}
             </tbody>
           </table>
@@ -83,4 +121,3 @@ export function Counters() {
 }
 
 export default Counters
-

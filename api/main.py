@@ -445,6 +445,17 @@ def get_counters() -> Dict[str, Any]:
     return {"items": [{"key": k, "value": v} for (k, v) in items], "total": len(items)}
 
 
+class CounterSetPayload(BaseModel):
+    value: int = Field(ge=0)
+
+
+@app.patch("/api/counters/{key}")
+def set_single_counter(key: str, payload: CounterSetPayload) -> Dict[str, Any]:
+    from .db import set_counter as _set_counter
+    val = _set_counter(key, payload.value)
+    return {"key": key, "value": val}
+
+
 @app.post("/api/counters/{key}/reset")
 def reset_single_counter(key: str) -> Dict[str, Any]:
     from .db import reset_counter as _reset_counter

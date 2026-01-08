@@ -311,6 +311,14 @@ export async function getCounters(): Promise<{ items: CounterItem[]; total: numb
   return http<{ items: CounterItem[]; total: number }>(`/api/counters`)
 }
 
+export async function setCounter(key: string, value: number): Promise<{ key: string; value: number }> {
+  return http<{ key: string; value: number }>(`/api/counters/${encodeURIComponent(key)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value }),
+  })
+}
+
 export async function resetCounter(key: string): Promise<{ key: string; value: number }> {
   return http<{ key: string; value: number }>(`/api/counters/${encodeURIComponent(key)}/reset`, { method: 'POST' })
 }

@@ -404,6 +404,24 @@ def inc_counter(key: str) -> int:
     return nxt
 
 
+def set_counter(key: str, value: int) -> int:
+    """Set counter value for key and return the stored integer."""
+    v = int(value)
+    eng = get_engine()
+    with eng.begin() as conn:
+        conn.execute(
+            sql_text(
+                """
+                INSERT INTO settings(key, value)
+                VALUES (:k, :v)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """
+            ),
+            {"k": f"counter:{key}", "v": str(v)},
+        )
+    return v
+
+
 def list_counters() -> List[Tuple[str, int]]:
     """Return a list of (key, value) for all counters in settings.
 
