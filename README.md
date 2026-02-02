@@ -74,28 +74,42 @@ Dev server: http://localhost:5173
 
 CORS is preconfigured for `http://localhost:5173` in the API.
 
-## Docker Deployment (Server)
+## Docker Deployment (Raspberry Pi + HTTPS)
 
-Prereqs: Docker Engine + Docker Compose plugin on your Linux server.
+Prereqs:
+- A public domain with DNS A/AAAA pointing at your Pi.
+- Ports 80 and 443 forwarded to the Pi.
+- Docker Engine + Docker Compose plugin installed.
 
 1. Copy this repo to the server (or clone it).
-2. Create a `.env` in the repo root (use `.env.example` as a template).
-3. Build and run:
+2. Create a `.env` in the repo root (use `.env.example` as a template) and set:
+   - `DOMAIN=example.com`
+   - `FRONTEND_BASE_URL=https://example.com`
+   - `STRAVA_REDIRECT_URI=https://example.com/api/auth/strava/callback`
+   - `STRAVA_WEBHOOK_CALLBACK_URL=https://example.com/api/webhooks/strava`
+   - `STRAVA_WEBHOOK_VERIFY_TOKEN=<random-string>`
+   - `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`
+   - `APP_AUTH_SECRET=<long-random-string>`
+3. In your Strava app settings, set Authorization Callback URL to the same
+   `STRAVA_REDIRECT_URI`.
+4. Build and run:
 
 ```
 docker compose up -d --build
 ```
 
-4. Check logs:
+5. Watch TLS issuance:
 
 ```
-docker compose logs -f
+docker compose logs -f caddy
 ```
 
 Notes:
-- The frontend container serves the UI on port 80 and proxies `/api` to the API container.
-- Set `FRONTEND_BASE_URL` to your public URL (e.g., `https://your-host`) so OAuth redirects land on the UI.
-- Strava webhooks require a public HTTPS callback URL.
+- Caddy handles HTTPS and renews certificates automatically (ports 80/443 must
+  be reachable).
+- `/api` is routed directly to the API; everything else goes to the frontend.
+- Webhooks are not auto-subscribed. After first sign-in, click "Enable webhooks"
+  in the UI or call `POST /api/admin/webhooks/subscribe`.
 
 ### Free Registry Option (GitHub Container Registry)
 
@@ -125,9 +139,10 @@ docker compose up -d
 
 ### Local Network Only
 
-If you are not using a public domain yet, you can still run the stack on your LAN by setting:
-- `FRONTEND_BASE_URL=http://<server-ip>`
-- `STRAVA_REDIRECT_URI=http://<server-ip>/api/auth/strava/callback`
+If you are not using a public domain yet, you can still run the stack on your LAN:
+- Set `DOMAIN=http://<server-ip>` and `FRONTEND_BASE_URL=http://<server-ip>`.
+- Set `STRAVA_REDIRECT_URI=http://<server-ip>/api/auth/strava/callback`.
+- Set `APP_COOKIE_SECURE=0` for HTTP cookies.
 
 Strava webhooks still require a public HTTPS URL.
 
