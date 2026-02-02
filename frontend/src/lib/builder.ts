@@ -7,6 +7,7 @@ export type ConditionKind =
   | "moving_pace"
   | "total_elevation_gain"
   | "title"
+  | "device"
   | "day_of_week"
   | "start_near"
   | "end_near";
@@ -49,6 +50,7 @@ export const CONDITION_SPECS: Record<
     placeholder: "e.g. 300",
   },
   title: { label: "Title", ops: ["contains"], placeholder: "e.g. Commute" },
+  device: { label: "Device", ops: ["equals", "contains"], placeholder: "e.g. Apple Watch" },
   day_of_week: {
     label: "Day of week",
     ops: ["in", "not_in"],
@@ -87,6 +89,9 @@ export function conditionFrom(
   }
   if (kind === "title") {
     return { type: "title", op, value: String(raw).trim() };
+  }
+  if (kind === "device") {
+    return { type: "device", op, value: String(raw).trim() };
   }
   if (kind === "day_of_week") {
     const arr = Array.isArray(raw)
@@ -150,6 +155,8 @@ export function conditionFromSelection(
     case "title":
     case "title_contains":
       return conditionFrom("title", "contains", raw);
+    case "device":
+      return conditionFrom("device", "contains", raw);
     case "day_of_week":
       return conditionFrom("day_of_week", "in", raw);
     default:

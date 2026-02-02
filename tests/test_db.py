@@ -23,7 +23,18 @@ class TestDBSchema(unittest.TestCase):
         with eng.connect() as conn:
             rows = conn.execute(sql_text("SELECT name FROM sqlite_master WHERE type='table'"))
             names = {r.name for r in rows.fetchall()}
-        self.assertTrue({'automations', 'oauth_tokens', 'activities', 'settings'}.issubset(names))
+        self.assertTrue(
+            {
+                'users',
+                'automations',
+                'oauth_tokens',
+                'activities',
+                'settings',
+                'automation_runs',
+                'gear',
+                'webhook_events',
+            }.issubset(names)
+        )
 
 
 if __name__ == '__main__':

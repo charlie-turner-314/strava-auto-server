@@ -1,38 +1,23 @@
-"""
-APScheduler setup for polling Strava activities.
+"""Strava ingestion helpers (manual sync + webhook event processing).
 
-Job runs every POLLING_INTERVAL_SEC seconds and:
-- Skips if no tokens in DB (logs occasionally).
-- Refreshes token if needed.
-- Fetches activities after `last_seen_activity_time` (settings key).
-- Upserts into `activities` table, updates `updated_at`.
-- Updates `last_seen_activity_time` to max start_date seen.
-
-Idempotency: updates existing row if raw_json changed, else skips.
+Supports:
+- Manual sync of activities list for reconciliation.
+- Webhook event processing (create/update/delete).
+- Shared automation evaluation helpers.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import time
 from typing import Any, Dict, Optional, Tuple, List, TypedDict
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import text as sql_text
 from sqlalchemy.engine import Engine
 
 from .db import get_engine, get_setting, set_setting, inc_counter, get_counter
 from .strava_client import StravaClient
-from .polling_profile import (
-    MIN_POLL_INTERVAL,
-    MAX_POLL_INTERVAL,
-    compute_polling_profile,
-    load_polling_profile,
-)
 
 log = logging.getLogger("strava-auto-server.scheduler")
 
@@ -47,31 +32,10 @@ def _canonical_json(obj: Any) -> str:
 
 
 
-_MIN_POLL_INTERVAL = MIN_POLL_INTERVAL
-_MAX_POLL_INTERVAL = MAX_POLL_INTERVAL
-
-
-def _minute_of_day_from_epoch(epoch: float) -> int:
-    lt = time.localtime(epoch)
-    return int(lt.tm_hour) * 60 + int(lt.tm_min)
-def _load_polling_profile() -> Dict[str, Any]:
-    return load_polling_profile()
-
-
-def _compute_polling_profile(
-    engine: Engine, *, default_interval: int
-) -> Dict[str, Any]:
-    profile = compute_polling_profile(engine, default_interval=default_interval)
-    log.info(
-        "Polling profile computed: samples=%s fallback=%ss",
-        int(profile.get("total_samples") or 0),
-        profile.get("fallback"),
-    )
-    return profile
-
-
-async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
-    client = StravaClient(engine)
+async def _ingest_activities(
+    engine: Engine, *, after: Optional[int] = None, athlete_id: Optional[int] = None
+) -> Tuple[int, int, Optional[int]]:
+    client = StravaClient(engine, athlete_id=athlete_id)
     # Cooldown guard: skip if active
     try:
         from .db import get_cooldown_detail as _get_cd_detail
@@ -95,7 +59,10 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
     # Quick token presence check
     with engine.connect() as conn:
         row = conn.execute(
-            sql_text("SELECT 1 FROM oauth_tokens WHERE provider='strava'")
+            sql_text(
+                "SELECT 1 FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+            ),
+            {"aid": int(athlete_id) if athlete_id is not None else -1},
         )
         has_token = row.fetchone() is not None
     if not has_token:
@@ -108,16 +75,31 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
     except Exception as e:  # noqa: BLE001
         log.warning("Token refresh error: %s", e)
 
-    after_raw = get_setting("last_seen_activity_time", "0")
-    after = int(after_raw) if after_raw else 0
-    after_param: Optional[int] = after
+    cursor_key = (
+        f"last_seen_activity_time:{int(athlete_id)}"
+        if athlete_id is not None
+        else "last_seen_activity_time"
+    )
+    after_raw = get_setting(cursor_key, "0")
+    cursor_after = int(after_raw) if after_raw else 0
+    after_param: Optional[int]
+    if after is None:
+        after_param = cursor_after if cursor_after > 0 else None
+    else:
+        after_param = int(after) if int(after) > 0 else None
     # If local DB is empty, fetch the most recent page (omit 'after')
     try:
         with engine.connect() as conn:
-            local_count = conn.execute(
-                sql_text("SELECT COUNT(*) AS c FROM activities")
-            ).scalar_one()
-        if int(local_count) == 0:
+            if athlete_id is not None:
+                local_count = conn.execute(
+                    sql_text("SELECT COUNT(*) AS c FROM activities WHERE athlete_id = :aid"),
+                    {"aid": int(athlete_id)},
+                ).scalar_one()
+            else:
+                local_count = conn.execute(
+                    sql_text("SELECT COUNT(*) AS c FROM activities")
+                ).scalar_one()
+        if after is None and int(local_count) == 0:
             log.info(
                 "Local DB empty; requesting most recent activities (no 'after' param)"
             )
@@ -142,11 +124,11 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
         except Exception:
             pass
         # Fallback: if we used an 'after' cursor and received nothing, fetch the most recent page
-        if after_param is not None:
-            try:
-                acts = await client.get_athlete_activities(after=None)
-            except Exception:
-                acts = []
+            if after_param is not None:
+                try:
+                    acts = await client.get_athlete_activities(after=None)
+                except Exception:
+                    acts = []
         if not acts:
             return (0, 0, after)
 
@@ -154,8 +136,9 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
     with engine.connect() as conn:
         auto_rows = conn.execute(
             sql_text(
-                "SELECT id, name, enabled, priority, conditions_json, effects_json FROM automations WHERE enabled = 1 ORDER BY priority DESC, created_at ASC"
-            )
+                "SELECT id, name, enabled, priority, conditions_json, effects_json FROM automations WHERE enabled = 1 AND athlete_id = :aid ORDER BY priority DESC, created_at ASC"
+            ),
+            {"aid": int(athlete_id) if athlete_id is not None else -1},
         ).fetchall()
     automations: List[Dict[str, Any]] = []
     for r in auto_rows:
@@ -174,7 +157,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
 
     inserted = 0
     updated = 0
-    max_seen = after if after_param is not None else 0
+    max_seen = (after_param or 0) if after_param is not None else 0
     now_iso = datetime.now(timezone.utc).isoformat()
 
     # Plan Strava writebacks after DB upserts to avoid long-held transactions
@@ -219,6 +202,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
             )
             sport_type = a.get("sport_type")
             name = a.get("name")
+            device_name = a.get("device_name") or a.get("device")
             distance = a.get("distance")
             moving_time = a.get("moving_time")
             elapsed_time = a.get("elapsed_time")
@@ -248,14 +232,14 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                     sql_text(
                         """
                         INSERT INTO activities (
-                          id, start_date, start_date_local, start_lat, start_lng, end_lat, end_lng,
-                          sport_type, name, distance,
+                          id, athlete_id, start_date, start_date_local, start_lat, start_lng, end_lat, end_lng,
+                          sport_type, name, device_name, distance,
                           moving_time, elapsed_time, total_elevation_gain, commute, workout_type,
                           hide_from_home,
                           raw_json, updated_at
                         ) VALUES (
-                          :id, :start_date, :start_date_local, :start_lat, :start_lng, :end_lat, :end_lng,
-                          :sport_type, :name, :distance,
+                          :id, :athlete_id, :start_date, :start_date_local, :start_lat, :start_lng, :end_lat, :end_lng,
+                          :sport_type, :name, :device_name, :distance,
                           :moving_time, :elapsed_time, :total_elevation_gain, :commute, :workout_type,
                           :hide_from_home,
                           :raw_json, :updated_at
@@ -264,6 +248,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                     ),
                     {
                         "id": aid,
+                        "athlete_id": int(athlete_id) if athlete_id is not None else None,
                         "start_date": start_date,
                         "start_date_local": start_date_local,
                         "start_lat": start_lat,
@@ -272,6 +257,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                         "end_lng": end_lng,
                         "sport_type": sport_type,
                         "name": name,
+                        "device_name": device_name,
                         "distance": distance,
                         "moving_time": moving_time,
                         "elapsed_time": elapsed_time,
@@ -305,7 +291,8 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                               start_lat = COALESCE(start_lat, :start_lat),
                               start_lng = COALESCE(start_lng, :start_lng),
                               end_lat = COALESCE(end_lat, :end_lat),
-                              end_lng = COALESCE(end_lng, :end_lng)
+                              end_lng = COALESCE(end_lng, :end_lng),
+                              device_name = COALESCE(device_name, :device_name)
                             WHERE id = :id
                             """
                         ),
@@ -315,6 +302,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                             "start_lng": start_lng,
                             "end_lat": end_lat,
                             "end_lng": end_lng,
+                            "device_name": device_name,
                         },
                     )
                     continue
@@ -322,6 +310,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                     sql_text(
                         """
                         UPDATE activities SET
+                          athlete_id = COALESCE(athlete_id, :athlete_id),
                           start_date = :start_date,
                           start_date_local = :start_date_local,
                           start_lat = COALESCE(:start_lat, start_lat),
@@ -330,6 +319,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                           end_lng = COALESCE(:end_lng, end_lng),
                           sport_type = :sport_type,
                           name = :name,
+                          device_name = COALESCE(:device_name, device_name),
                           distance = :distance,
                           moving_time = :moving_time,
                           elapsed_time = :elapsed_time,
@@ -344,6 +334,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                     ),
                     {
                         "id": aid,
+                        "athlete_id": int(athlete_id) if athlete_id is not None else None,
                         "start_date": start_date,
                         "start_date_local": start_date_local,
                         "start_lat": start_lat,
@@ -352,6 +343,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                         "end_lng": end_lng,
                         "sport_type": sport_type,
                         "name": name,
+                        "device_name": device_name,
                         "distance": distance,
                         "moving_time": moving_time,
                         "elapsed_time": elapsed_time,
@@ -390,6 +382,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                             "moving_time": moving_time,
                             "total_elevation_gain": total_elevation_gain,
                             "name": name,
+                            "device_name": device_name,
                             "start_date": start_date,
                             "start_date_local": start_date_local,
                             "start_lat": start_lat,
@@ -397,6 +390,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                             "end_lat": end_lat,
                             "end_lng": end_lng,
                         },
+                        athlete_id=athlete_id,
                     ):
                         matched_ids.append(str(auto.get("id")))
                         (
@@ -464,11 +458,14 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                     payload["matched"] = matched_ids
                     pending.append(payload)
 
-    set_setting("last_seen_activity_time", str(max_seen))
+    # Avoid moving the cursor backwards when a manual "after" override yields no newer data.
+    if max_seen < cursor_after:
+        max_seen = cursor_after
+    set_setting(cursor_key, str(max_seen))
     # Sync gear only when new or updated activities are present for this ingest run
     if inserted:
         try:
-            await _sync_gear(engine, client)
+            await _sync_gear(engine, client, athlete_id=athlete_id)
         except Exception as e:  # noqa: BLE001
             log.info("Gear sync skipped: %s", e)
     # Apply Strava updates outside transaction, then reflect to DB
@@ -477,7 +474,7 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
             # Render counter templates in titles on apply
             nm = upd.get("name")
             final_name = (
-                _render_title_with_counters(nm)
+                _render_title_with_counters(nm, athlete_id=athlete_id)
                 if isinstance(nm, str) and "{count:" in nm
                 else nm
             )
@@ -537,13 +534,14 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
                         "now": datetime.now(timezone.utc).isoformat(),
                     },
                 )
-        # Audit record for scheduler apply
+        # Audit record for sync-based apply
         try:
             from .main import _insert_audit_run  # lazy import to avoid cycle on import
 
             _insert_audit_run(
                 int(upd["id"]),
-                source="scheduler",
+                athlete_id=int(athlete_id) if athlete_id is not None else None,
+                source="sync",
                 automation_ids=list(upd.get("matched", [])),
                 changes={
                     k: v
@@ -575,11 +573,554 @@ async def _ingest_activities(engine: Engine) -> Tuple[int, int, Optional[int]]:
     return (inserted, updated, max_seen)
 
 
+def _activity_detail_fields(detail: Dict[str, Any]) -> Dict[str, Any]:
+    start_ll = detail.get("start_latlng") or [None, None]
+    end_ll = detail.get("end_latlng") or [None, None]
+
+    def _to_float(val: Any) -> Optional[float]:
+        try:
+            if val is None:
+                return None
+            return float(val)
+        except Exception:
+            return None
+
+    def _to_int(val: Any) -> Optional[int]:
+        try:
+            if val is None:
+                return None
+            return int(val)
+        except Exception:
+            return None
+
+    start_lat = _to_float(start_ll[0]) if isinstance(start_ll, (list, tuple)) else None
+    start_lng = _to_float(start_ll[1]) if isinstance(start_ll, (list, tuple)) else None
+    end_lat = _to_float(end_ll[0]) if isinstance(end_ll, (list, tuple)) else None
+    end_lng = _to_float(end_ll[1]) if isinstance(end_ll, (list, tuple)) else None
+
+    distance = _to_float(detail.get("distance"))
+    moving_time = _to_int(detail.get("moving_time"))
+    elapsed_time = _to_int(detail.get("elapsed_time"))
+    elev_gain = _to_float(detail.get("total_elevation_gain"))
+    avg_cadence = _to_float(detail.get("average_cadence"))
+    avg_pace = None
+    try:
+        if distance and moving_time and distance > 0:
+            avg_pace = float(moving_time) / (distance / 1000.0)
+    except Exception:
+        avg_pace = None
+
+    return {
+        "start_date": detail.get("start_date"),
+        "start_date_local": detail.get("start_date_local"),
+        "start_lat": start_lat,
+        "start_lng": start_lng,
+        "end_lat": end_lat,
+        "end_lng": end_lng,
+        "sport_type": detail.get("sport_type"),
+        "name": detail.get("name"),
+        "device_name": detail.get("device_name") or detail.get("device"),
+        "distance": distance,
+        "moving_time": moving_time,
+        "elapsed_time": elapsed_time,
+        "total_elevation_gain": elev_gain,
+        "gear_id": detail.get("gear_id"),
+        "commute": detail.get("commute"),
+        "workout_type": detail.get("workout_type"),
+        "hide_from_home": detail.get("hide_from_home"),
+        "avg_cadence": avg_cadence,
+        "avg_pace_s_per_km": avg_pace,
+        "description": detail.get("description"),
+    }
+
+
+def _upsert_activity_detail(
+    engine: Engine, detail: Dict[str, Any], *, athlete_id: Optional[int] = None
+) -> Tuple[bool, bool]:
+    """Insert or update a single activity row based on Strava detail payload."""
+    try:
+        aid = int(detail.get("id"))
+    except Exception:
+        return (False, False)
+    fields = _activity_detail_fields(detail)
+    raw_json = _canonical_json(detail)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with engine.begin() as conn:
+        row = conn.execute(
+            sql_text("SELECT raw_json FROM activities WHERE id = :id"),
+            {"id": aid},
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO activities (
+                      id, athlete_id, start_date, start_date_local, start_lat, start_lng, end_lat, end_lng,
+                      sport_type, name, device_name, distance,
+                      moving_time, elapsed_time, total_elevation_gain, commute, workout_type,
+                      hide_from_home, gear_id, avg_cadence, avg_pace_s_per_km,
+                      detail_json, raw_json, updated_at
+                    ) VALUES (
+                      :id, :athlete_id, :start_date, :start_date_local, :start_lat, :start_lng, :end_lat, :end_lng,
+                      :sport_type, :name, :device_name, :distance,
+                      :moving_time, :elapsed_time, :total_elevation_gain, :commute, :workout_type,
+                      :hide_from_home, :gear_id, :avg_cadence, :avg_pace_s_per_km,
+                      :detail_json, :raw_json, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "id": aid,
+                    "athlete_id": int(athlete_id) if athlete_id is not None else None,
+                    "start_date": fields.get("start_date"),
+                    "start_date_local": fields.get("start_date_local"),
+                    "start_lat": fields.get("start_lat"),
+                    "start_lng": fields.get("start_lng"),
+                    "end_lat": fields.get("end_lat"),
+                    "end_lng": fields.get("end_lng"),
+                    "sport_type": fields.get("sport_type"),
+                    "name": fields.get("name"),
+                    "device_name": fields.get("device_name"),
+                    "distance": fields.get("distance"),
+                    "moving_time": fields.get("moving_time"),
+                    "elapsed_time": fields.get("elapsed_time"),
+                    "total_elevation_gain": fields.get("total_elevation_gain"),
+                    "commute": 1 if fields.get("commute") else 0 if fields.get("commute") is not None else None,
+                    "workout_type": fields.get("workout_type"),
+                    "hide_from_home": 1 if fields.get("hide_from_home") else 0 if fields.get("hide_from_home") is not None else None,
+                    "gear_id": fields.get("gear_id"),
+                    "avg_cadence": fields.get("avg_cadence"),
+                    "avg_pace_s_per_km": fields.get("avg_pace_s_per_km"),
+                    "detail_json": raw_json,
+                    "raw_json": raw_json,
+                    "updated_at": now_iso,
+                },
+            )
+            return (True, False)
+
+        try:
+            prev = json.loads(row.raw_json)
+            same = prev == detail
+        except Exception:
+            same = row.raw_json == raw_json
+
+        if same:
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE activities SET
+                      start_lat = COALESCE(start_lat, :start_lat),
+                      start_lng = COALESCE(start_lng, :start_lng),
+                      end_lat = COALESCE(end_lat, :end_lat),
+                      end_lng = COALESCE(end_lng, :end_lng),
+                      device_name = COALESCE(device_name, :device_name)
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "id": aid,
+                    "start_lat": fields.get("start_lat"),
+                    "start_lng": fields.get("start_lng"),
+                    "end_lat": fields.get("end_lat"),
+                    "end_lng": fields.get("end_lng"),
+                    "device_name": fields.get("device_name"),
+                },
+            )
+            return (False, False)
+
+        conn.execute(
+            sql_text(
+                """
+                UPDATE activities SET
+                  athlete_id = COALESCE(athlete_id, :athlete_id),
+                  start_date = :start_date,
+                  start_date_local = :start_date_local,
+                  start_lat = COALESCE(:start_lat, start_lat),
+                  start_lng = COALESCE(:start_lng, start_lng),
+                  end_lat = COALESCE(:end_lat, end_lat),
+                  end_lng = COALESCE(:end_lng, end_lng),
+                  sport_type = :sport_type,
+                  name = :name,
+                  device_name = COALESCE(:device_name, device_name),
+                  distance = :distance,
+                  moving_time = :moving_time,
+                  elapsed_time = :elapsed_time,
+                  total_elevation_gain = :total_elevation_gain,
+                  commute = COALESCE(:commute, commute),
+                  hide_from_home = COALESCE(:hide_from_home, hide_from_home),
+                  workout_type = COALESCE(:workout_type, workout_type),
+                  gear_id = COALESCE(:gear_id, gear_id),
+                  avg_cadence = COALESCE(:avg_cadence, avg_cadence),
+                  avg_pace_s_per_km = COALESCE(:avg_pace_s_per_km, avg_pace_s_per_km),
+                  detail_json = :detail_json,
+                  raw_json = :raw_json,
+                  updated_at = :updated_at
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": aid,
+                "athlete_id": int(athlete_id) if athlete_id is not None else None,
+                "start_date": fields.get("start_date"),
+                "start_date_local": fields.get("start_date_local"),
+                "start_lat": fields.get("start_lat"),
+                "start_lng": fields.get("start_lng"),
+                "end_lat": fields.get("end_lat"),
+                "end_lng": fields.get("end_lng"),
+                "sport_type": fields.get("sport_type"),
+                "name": fields.get("name"),
+                "device_name": fields.get("device_name"),
+                "distance": fields.get("distance"),
+                "moving_time": fields.get("moving_time"),
+                "elapsed_time": fields.get("elapsed_time"),
+                "total_elevation_gain": fields.get("total_elevation_gain"),
+                "commute": 1 if fields.get("commute") else 0 if fields.get("commute") is not None else None,
+                "hide_from_home": 1 if fields.get("hide_from_home") else 0 if fields.get("hide_from_home") is not None else None,
+                "workout_type": fields.get("workout_type"),
+                "gear_id": fields.get("gear_id"),
+                "avg_cadence": fields.get("avg_cadence"),
+                "avg_pace_s_per_km": fields.get("avg_pace_s_per_km"),
+                "detail_json": raw_json,
+                "raw_json": raw_json,
+                "updated_at": now_iso,
+            },
+        )
+        return (False, True)
+
+
+async def process_webhook_event(
+    engine: Engine, event: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Handle a Strava webhook event payload."""
+    object_type = str(event.get("object_type") or "")
+    aspect_type = str(event.get("aspect_type") or "")
+    try:
+        object_id = int(event.get("object_id") or 0)
+    except Exception:
+        object_id = 0
+    try:
+        athlete_id = int(event.get("owner_id") or 0)
+    except Exception:
+        athlete_id = 0
+
+    if object_type != "activity" or not object_id or not athlete_id:
+        return {"handled": False, "message": "Unsupported webhook object"}
+
+    if aspect_type == "delete":
+        deleted = 0
+        with engine.begin() as conn:
+            res = conn.execute(
+                sql_text("DELETE FROM activities WHERE id = :id"),
+                {"id": object_id},
+            )
+            deleted = int(getattr(res, "rowcount", 0) or 0)
+            conn.execute(
+                sql_text("DELETE FROM automation_runs WHERE activity_id = :id"),
+                {"id": object_id},
+            )
+        return {"handled": True, "deleted": bool(deleted), "activity_id": object_id}
+
+    # Cooldown guard
+    try:
+        from .db import get_cooldown_detail as _get_cd_detail
+        from .timefmt import human_local_from_epoch as _hl
+
+        _cd = _get_cd_detail()
+        cd_until = int(_cd.get("until") or 0)
+        now = int(time.time())
+        if cd_until and now < cd_until:
+            reason = str(_cd.get("reason") or "")
+            scope = str(_cd.get("scope") or "")
+            msg = f"Cooldown active until {_hl(cd_until)} (epoch={cd_until})"
+            if reason:
+                msg += f"; reason: {reason}"
+            if scope:
+                msg += f"; scope: {scope}"
+            return {"handled": False, "activity_id": object_id, "message": msg}
+    except Exception:
+        pass
+
+    # Token presence check
+    with engine.connect() as conn:
+        row = conn.execute(
+            sql_text(
+                "SELECT 1 FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+            ),
+            {"aid": int(athlete_id)},
+        )
+        if row.fetchone() is None:
+            return {"handled": False, "activity_id": object_id, "message": "No Strava OAuth tokens found"}
+
+    client = StravaClient(engine, athlete_id=athlete_id)
+    try:
+        await client.refresh_token_if_needed()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Token refresh error: %s", e)
+
+    try:
+        detail = await client.get_activity_detail(object_id)
+    except Exception as e:  # noqa: BLE001
+        return {"handled": False, "activity_id": object_id, "message": f"Failed to fetch detail: {e}"}
+
+    if not detail:
+        return {"handled": False, "activity_id": object_id, "message": "Strava returned no data"}
+
+    inserted, updated = _upsert_activity_detail(engine, detail, athlete_id=athlete_id)
+    if inserted:
+        try:
+            await _sync_gear(engine, client, athlete_id=athlete_id)
+        except Exception as e:  # noqa: BLE001
+            log.info("Gear sync skipped: %s", e)
+
+    # Update cursor based on start_date if present
+    try:
+        start_date = detail.get("start_date")
+        if isinstance(start_date, str):
+            ts = int(_parse_iso8601(start_date).timestamp())
+            cursor_key = f"last_seen_activity_time:{int(athlete_id)}"
+            cur_raw = get_setting(cursor_key, "0")
+            cur = int(cur_raw or 0)
+            if ts > cur:
+                set_setting(cursor_key, str(ts))
+    except Exception:
+        pass
+
+    # Load enabled automations
+    with engine.connect() as conn:
+        auto_rows = conn.execute(
+            sql_text(
+                "SELECT id, name, enabled, priority, conditions_json, effects_json FROM automations WHERE enabled = 1 AND athlete_id = :aid ORDER BY priority DESC, created_at ASC"
+            ),
+            {"aid": int(athlete_id)},
+        ).fetchall()
+    automations: List[Dict[str, Any]] = []
+    for r in auto_rows:
+        try:
+            automations.append(
+                {
+                    "id": r.id,
+                    "name": r.name,
+                    "priority": r.priority,
+                    "conditions": json.loads(r.conditions_json or "[]"),
+                    "effects": json.loads(r.effects_json or "[]"),
+                }
+            )
+        except Exception:
+            continue
+
+    # Build activity dict for condition checks
+    fields = _activity_detail_fields(detail)
+    activity = {
+        "id": object_id,
+        "sport_type": fields.get("sport_type"),
+        "distance": fields.get("distance"),
+        "moving_time": fields.get("moving_time"),
+        "total_elevation_gain": fields.get("total_elevation_gain"),
+        "name": fields.get("name"),
+        "device_name": fields.get("device_name"),
+        "start_date": fields.get("start_date"),
+        "start_date_local": fields.get("start_date_local"),
+        "start_lat": fields.get("start_lat"),
+        "start_lng": fields.get("start_lng"),
+        "end_lat": fields.get("end_lat"),
+        "end_lng": fields.get("end_lng"),
+    }
+    name = fields.get("name")
+    sport_type = fields.get("sport_type")
+    commute = fields.get("commute")
+    workout_type = fields.get("workout_type")
+    gear_id = fields.get("gear_id")
+    description = fields.get("description")
+    hide_from_home = fields.get("hide_from_home")
+
+    pending: Dict[str, Any] = {"id": object_id}
+    matched_ids: List[str] = []
+    desired_name = name
+    desired_sport_type = sport_type
+    desired_commute: Optional[bool] = None
+    desired_workout_type: Optional[int] = None
+    desired_gear_id: Optional[str] = None
+    desired_description: Optional[str] = None
+    desired_hide_from_home: Optional[bool] = None
+
+    for auto in automations:
+        if _conditions_match(
+            auto.get("conditions", []),
+            activity,
+            athlete_id=athlete_id,
+        ):
+            matched_ids.append(str(auto.get("id")))
+            (
+                desired_name,
+                desired_sport_type,
+                desired_commute,
+                desired_workout_type,
+                new_gear_id,
+            ) = _apply_effects(
+                auto.get("effects", []),
+                desired_name,
+                desired_sport_type,
+                desired_commute,
+                desired_workout_type,
+            )
+            if new_gear_id is not None:
+                desired_gear_id = new_gear_id
+            for e in auto.get("effects", []):
+                if e.get("type") == "set_description":
+                    txt = (e.get("params") or {}).get("text")
+                    if txt is not None:
+                        desired_description = str(txt)
+                if e.get("type") == "hide_from_feeds":
+                    p = e.get("params") or {}
+                    v_home = p.get("home", True)
+                    desired_hide_from_home = bool(v_home)
+
+    changed = False
+    if (
+        isinstance(desired_name, str)
+        and "{count:" in desired_name
+        and isinstance(name, str)
+        and _template_already_applied(name, desired_name)
+    ):
+        desired_name = name
+    if desired_name is not None and desired_name != name:
+        pending["name"] = desired_name
+        changed = True
+    if desired_sport_type and desired_sport_type != sport_type:
+        pending["sport_type"] = desired_sport_type
+        changed = True
+    if desired_commute is not None:
+        pending["commute"] = bool(desired_commute)
+        changed = True
+    if desired_workout_type is not None:
+        pending["workout_type"] = int(desired_workout_type)
+        changed = True
+    if desired_gear_id is not None:
+        pending["gear_id"] = str(desired_gear_id)
+        changed = True
+    if desired_description is not None and desired_description != description:
+        pending["description"] = desired_description
+        changed = True
+    if desired_hide_from_home is not None:
+        pending["hide_from_home"] = desired_hide_from_home
+        changed = True
+
+    if not changed:
+        return {
+            "handled": True,
+            "activity_id": object_id,
+            "inserted": inserted,
+            "updated": updated,
+            "applied": False,
+        }
+
+    # Apply updates on Strava
+    try:
+        nm = pending.get("name")
+        final_name = (
+            _render_title_with_counters(nm, athlete_id=athlete_id)
+            if isinstance(nm, str) and "{count:" in nm
+            else nm
+        )
+        await client.update_activity(
+            object_id,
+            name=final_name,
+            sport_type=pending.get("sport_type"),
+            commute=pending.get("commute"),
+            workout_type=pending.get("workout_type"),
+            gear_id=pending.get("gear_id"),
+            hide_from_home=pending.get("hide_from_home"),
+            description=pending.get("description"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("Failed to update activity %s: %s", object_id, e)
+        return {
+            "handled": True,
+            "activity_id": object_id,
+            "inserted": inserted,
+            "updated": updated,
+            "applied": False,
+            "error": str(e),
+        }
+
+    # Reflect to local DB
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                """
+                UPDATE activities SET
+                  athlete_id = COALESCE(athlete_id, :athlete_id),
+                  name = COALESCE(:name, name),
+                  sport_type = COALESCE(:sport_type, sport_type),
+                  workout_type = COALESCE(:workout_type, workout_type),
+                  commute = COALESCE(:commute, commute),
+                  gear_id = COALESCE(:gear_id, gear_id),
+                  hide_from_home = COALESCE(:hide_from_home, hide_from_home),
+                  updated_at = :now
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": object_id,
+                "athlete_id": int(athlete_id),
+                "name": final_name,
+                "sport_type": pending.get("sport_type"),
+                "workout_type": pending.get("workout_type"),
+                "commute": (
+                    1 if pending.get("commute") else 0 if pending.get("commute") is not None else None
+                ),
+                "gear_id": pending.get("gear_id"),
+                "hide_from_home": (
+                    1 if pending.get("hide_from_home") else 0 if pending.get("hide_from_home") is not None else None
+                ),
+                "now": now_iso,
+            },
+        )
+
+    try:
+        from .main import _insert_audit_run  # lazy import to avoid cycle on import
+
+        _insert_audit_run(
+            int(object_id),
+            athlete_id=int(athlete_id),
+            source="webhook",
+            automation_ids=matched_ids,
+            changes={
+                k: v
+                for k, v in pending.items()
+                if k
+                in (
+                    "name",
+                    "sport_type",
+                    "commute",
+                    "workout_type",
+                    "gear_id",
+                    "description",
+                )
+                and v is not None
+            },
+            error=None,
+        )
+    except Exception:
+        pass
+
+    return {
+        "handled": True,
+        "activity_id": object_id,
+        "inserted": inserted,
+        "updated": updated,
+        "applied": True,
+    }
+
+
 async def refresh_activity_detail(
     engine: Engine,
     client: StravaClient,
     activity_id: int,
     *,
+    athlete_id: Optional[int] = None,
     respect_cooldown: bool = True,
 ) -> Dict[str, Any]:
     """Fetch the latest detail for an activity and update the local row.
@@ -688,6 +1229,9 @@ async def refresh_activity_detail(
         "raw_json": _canonical_json(detail),
         "detail_json": _canonical_json(detail),
     }
+    if athlete_id is not None:
+        params["athlete_id"] = int(athlete_id)
+        sets.append("athlete_id = COALESCE(athlete_id, :athlete_id)")
 
     def _assign(column: str, value: Any, *, boolean: bool = False) -> None:
         if value is None:
@@ -707,6 +1251,7 @@ async def refresh_activity_detail(
     _assign("end_lng", end_lng)
     _assign("sport_type", detail.get("sport_type"))
     _assign("name", detail.get("name"))
+    _assign("device_name", detail.get("device_name") or detail.get("device"))
     _assign("distance", distance)
     _assign("moving_time", moving_time)
     _assign("elapsed_time", elapsed_time)
@@ -737,117 +1282,14 @@ async def refresh_activity_detail(
     }
 
 
-def start_scheduler(engine: Optional[Engine] = None) -> AsyncIOScheduler:
-    """Create and start the AsyncIOScheduler for polling with adaptive cadence."""
-
-    eng = engine or get_engine()
-    # Environment variable remains the fallback/default interval when no historical data exists.
-    default_interval = int(os.getenv("POLLING_INTERVAL_SEC", "120"))
-    default_interval = max(
-        _MIN_POLL_INTERVAL, min(_MAX_POLL_INTERVAL, default_interval)
-    )
-    scheduler = AsyncIOScheduler()
-
-    profile = _load_polling_profile()
-    if not profile:
-        profile = _compute_polling_profile(eng, default_interval=default_interval)
-
-    state: Dict[str, Any] = {
-        "no_token_count": 0,
-        "last_run_ts": 0.0,
-        "skip_runs": 0,
-        "profile": profile,
-        "default_interval": default_interval,
-    }
-
-    async def job_wrapper() -> None:
-        now_epoch = time.time()
-        prof = state.get("profile") or {}
-        valid_until = int(prof.get("valid_until") or 0)
-        if not prof or now_epoch >= valid_until:
-            prof = _compute_polling_profile(
-                eng, default_interval=state["default_interval"]
-            )
-            state["profile"] = prof
-        intervals = prof.get("intervals") or {}
-        minute = _minute_of_day_from_epoch(now_epoch)
-        desired = intervals.get(minute)
-        if desired is None:
-            desired = intervals.get(str(minute), state["default_interval"])
-        desired = int(desired or state["default_interval"])
-
-        last_run = float(state.get("last_run_ts") or 0.0)
-        since_last = now_epoch - last_run if last_run else None
-
-        def _persist_schedule(next_epoch: float) -> None:
-            try:
-                set_setting("scheduler_current_interval_sec", str(int(desired)))
-                set_setting("scheduler_next_run_epoch", str(int(max(0, next_epoch))))
-            except Exception:
-                pass
-
-        if last_run:
-            _persist_schedule(last_run + desired)
-        else:
-            _persist_schedule(now_epoch)
-
-        if (
-            last_run
-            and since_last is not None
-            and since_last < max(desired - 1, _MIN_POLL_INTERVAL / 2)
-        ):
-            state["skip_runs"] = state.get("skip_runs", 0) + 1
-            if state["skip_runs"] % 5 == 0:
-                log.debug(
-                    "Skipping ingest; desired interval=%ss, last run %.1fs ago",
-                    desired,
-                    since_last,
-                )
-            return
-
-        state["skip_runs"] = 0
-        state["last_run_ts"] = now_epoch
-
-        try:
-            inserted, updated, after = await _ingest_activities(eng)
-            # Track whether we are currently connected
-            if after is None:
-                state["no_token_count"] += 1
-                if state["no_token_count"] % 10 == 1:
-                    log.info(
-                        "Scheduler: no Strava tokens found; waiting for OAuth connect"
-                    )
-            else:
-                state["no_token_count"] = 0
-        except Exception as e:  # noqa: BLE001
-            # Never crash the scheduler on transient errors
-            log.exception("Scheduler run failed: %s", e)
-        finally:
-            finish = time.time()
-            state["last_run_ts"] = finish
-            _persist_schedule(finish + desired)
-
-    scheduler.add_job(
-        job_wrapper,
-        "interval",
-        seconds=_MIN_POLL_INTERVAL,
-        coalesce=True,
-        max_instances=1,
-    )
-    scheduler.start()
-    log.info(
-        "Scheduler started (base=%ss, default=%ss)",
-        _MIN_POLL_INTERVAL,
-        default_interval,
-    )
-    return scheduler
-
-
 # ---------------- Automation helpers (minimal, in-sync with frontend) -------
 
 
 def _conditions_match(
-    conditions: List[Dict[str, Any]], activity: Dict[str, Any]
+    conditions: List[Dict[str, Any]],
+    activity: Dict[str, Any],
+    *,
+    athlete_id: Optional[int] = None,
 ) -> bool:
     def compare_num(actual: Optional[float], op: str, target: Any) -> bool:
         try:
@@ -954,6 +1396,15 @@ def _conditions_match(
                 and str(val).lower() not in str(activity.get("name") or "").lower()
             ):
                 return False
+        elif ctype == "device":
+            dev = str(activity.get("device_name") or activity.get("device") or "")
+            tgt = str(val or "")
+            if op == "equals":
+                if dev.strip().lower() != tgt.strip().lower():
+                    return False
+            elif op == "contains":
+                if tgt.strip().lower() not in dev.lower():
+                    return False
         elif ctype in ("nearby_activity", "adjacent_activity"):
             # value: { minutes: int, sport_type?: str }
             try:
@@ -975,6 +1426,9 @@ def _conditions_match(
             # Build time bounds depending on op
             conds: list[str] = ["id <> :id"]
             params: Dict[str, Any] = {"id": int(activity.get("id") or 0)}
+            if athlete_id is not None:
+                conds.append("athlete_id = :aid")
+                params["aid"] = int(athlete_id)
             if op == "before":
                 conds.append("start_date >= :lo_iso")
                 conds.append("start_date <= :ref_iso")
@@ -1077,14 +1531,16 @@ import re
 _COUNT_RE = re.compile(r"\{count:([A-Za-z0-9_\-]+)\}")
 
 
-def _render_title_with_counters(name: Optional[str]) -> Optional[str]:
+def _render_title_with_counters(
+    name: Optional[str], *, athlete_id: Optional[int] = None
+) -> Optional[str]:
     if not name:
         return name
 
     def repl(m: re.Match[str]) -> str:
         key = m.group(1)
         try:
-            return str(inc_counter(key))
+            return str(inc_counter(key, athlete_id))
         except Exception:
             return "0"
 
@@ -1109,7 +1565,9 @@ def _template_already_applied(current: str, template: str) -> bool:
     return bool(pat.match(current or ""))
 
 
-async def _sync_gear(engine: Engine, client: StravaClient) -> None:
+async def _sync_gear(
+    engine: Engine, client: StravaClient, *, athlete_id: Optional[int] = None
+) -> None:
     data = await client.get_athlete_gear()
     shoes = data.get("shoes") or []
     if not shoes:
@@ -1120,6 +1578,7 @@ async def _sync_gear(engine: Engine, client: StravaClient) -> None:
             try:
                 params = {
                     "id": str(s.get("id")),
+                    "athlete_id": int(athlete_id) if athlete_id is not None else None,
                     "name": str(s.get("name", "")),
                     "type": "shoe",
                     "is_primary": 1 if s.get("primary") else 0,
@@ -1136,8 +1595,14 @@ async def _sync_gear(engine: Engine, client: StravaClient) -> None:
             res = conn.execute(
                 sql_text(
                     """
-                    UPDATE gear SET name=:name, type=:type, is_primary=:is_primary, distance=:distance, updated_at=:now
-                    WHERE id=:id
+                    UPDATE gear SET
+                      athlete_id = COALESCE(athlete_id, :athlete_id),
+                      name=:name,
+                      type=:type,
+                      is_primary=:is_primary,
+                      distance=:distance,
+                      updated_at=:now
+                    WHERE id=:id AND (athlete_id = :athlete_id OR athlete_id IS NULL)
                     """
                 ),
                 params,
@@ -1146,8 +1611,8 @@ async def _sync_gear(engine: Engine, client: StravaClient) -> None:
                 conn.execute(
                     sql_text(
                         """
-                        INSERT INTO gear (id, name, type, is_primary, distance, created_at, updated_at)
-                        VALUES (:id, :name, :type, :is_primary, :distance, :now, :now)
+                        INSERT INTO gear (id, athlete_id, name, type, is_primary, distance, created_at, updated_at)
+                        VALUES (:id, :athlete_id, :name, :type, :is_primary, :distance, :now, :now)
                         """
                     ),
                     params,

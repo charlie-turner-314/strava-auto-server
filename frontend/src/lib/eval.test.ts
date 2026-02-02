@@ -8,6 +8,7 @@ const baseActivity: Activity = {
   start_date_local: '2024-01-01T11:00:00+11:00',
   sport_type: 'Run',
   name: 'Morning Run',
+  device_name: 'Apple Watch',
   distance: 5000,
   moving_time: 1800,
   elapsed_time: 1900,
@@ -31,6 +32,12 @@ describe('evaluateConditions', () => {
   it('handles title contains', () => {
     expect(evaluateConditions([{ type: 'title', op: 'contains', value: 'morning' } satisfies Condition], baseActivity)).toBe(true)
     expect(evaluateConditions([{ type: 'title', op: 'contains', value: 'evening' } satisfies Condition], baseActivity)).toBe(false)
+  })
+
+  it('handles device matching', () => {
+    expect(evaluateConditions([{ type: 'device', op: 'equals', value: 'apple watch' } satisfies Condition], baseActivity)).toBe(true)
+    expect(evaluateConditions([{ type: 'device', op: 'contains', value: 'watch' } satisfies Condition], baseActivity)).toBe(true)
+    expect(evaluateConditions([{ type: 'device', op: 'contains', value: 'garmin' } satisfies Condition], baseActivity)).toBe(false)
   })
 })
 

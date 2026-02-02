@@ -5,25 +5,28 @@ name: strava-auto-server-dev
 services:
   api:
     build:
-      context: ./api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api/Dockerfile
       # Ensure ARM64 on Raspberry Pi; harmless elsewhere
       # platform: linux/arm64
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     environment:
       # App basics
       APP_ENV: "dev"
       LOG_LEVEL: "INFO"
+      APP_AUTH_SECRET: "${APP_AUTH_SECRET}"
+      FRONTEND_BASE_URL: "${FRONTEND_BASE_URL:-http://localhost:5173}"
       # DB (SQLite path inside container mapped to host ./data)
       DATABASE_URL: "sqlite:////data/app.db"
       # Strava OAuth
       STRAVA_CLIENT_ID: "${STRAVA_CLIENT_ID}"
       STRAVA_CLIENT_SECRET: "${STRAVA_CLIENT_SECRET}"
       STRAVA_REDIRECT_URI: "${STRAVA_REDIRECT_URI}" # e.g. http://localhost:8000/api/auth/strava/callback
-      # Polling interval seconds (MVP)
-      POLLING_INTERVAL_SEC: "120"
+      # Strava webhooks (public HTTPS URL required)
+      STRAVA_WEBHOOK_VERIFY_TOKEN: "${STRAVA_WEBHOOK_VERIFY_TOKEN}"
+      STRAVA_WEBHOOK_CALLBACK_URL: "${STRAVA_WEBHOOK_CALLBACK_URL}"
     volumes:
-      - ./api:/app           # source mount for hot reload
+      - ./api:/app/api       # source mount for hot reload
       - ./data:/data         # SQLite persistence
     ports:
       - "8000:8000"
@@ -37,12 +40,12 @@ services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
       # platform: linux/arm64
     command: npm run dev -- --host --port 5173
     environment:
       # Used by Vite proxy or your api client
-      VITE_API_BASE_URL: "http://api:8000"
+      VITE_API_BASE: "http://localhost:8000"
       # If you prefer a dev proxy in vite.config.ts, you can use /api → http://api:8000
     volumes:
       - ./frontend:/usr/src/app

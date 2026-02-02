@@ -3,7 +3,7 @@ import type { Condition, Effect, Activity } from './api'
 type ActivityWithDescription = Activity & { description?: string | null }
 
 export function evaluateConditions(conditions: Condition[], activity: Activity): boolean {
-  // Supports types: sport_type, distance, moving_time, total_elevation_gain, title
+  // Supports types: sport_type, distance, moving_time, total_elevation_gain, title, device
   return conditions.every((c) => {
     const op = c.op
     const type = c.type
@@ -27,6 +27,13 @@ export function evaluateConditions(conditions: Condition[], activity: Activity):
         return compareNum(activity.total_elevation_gain, op, val)
       case 'title':
         return op === 'contains' ? (activity.name || '').toLowerCase().includes(String(val).toLowerCase()) : true
+      case 'device': {
+        const device = (activity.device_name || '') as string
+        const target = String(val || '')
+        if (op === 'equals') return device.trim().toLowerCase() === target.trim().toLowerCase()
+        if (op === 'contains') return device.toLowerCase().includes(target.trim().toLowerCase())
+        return true
+      }
       case 'day_of_week': {
         // Determine local weekday from start_date_local if available, else start_date
         const src = activity.start_date_local || activity.start_date

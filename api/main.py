@@ -23,7 +23,6 @@ from sqlalchemy.engine import Engine, Result
 
 from .db import get_engine, ensure_schema, set_setting, get_cooldown_detail
 from .strava_client import StravaClient
-from .scheduler import start_scheduler
 from . import scheduler as _scheduler
 from .timefmt import human_local_from_epoch
 
@@ -39,10 +38,10 @@ STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET", "")
 STRAVA_REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI", "")
 FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
+STRAVA_WEBHOOK_VERIFY_TOKEN = os.getenv("STRAVA_WEBHOOK_VERIFY_TOKEN", "")
+STRAVA_WEBHOOK_CALLBACK_URL = os.getenv("STRAVA_WEBHOOK_CALLBACK_URL", "")
 
-# Simple auth (single user)
-LOGIN_USERNAME = os.getenv("APP_LOGIN_USERNAME", "admin")
-LOGIN_PASSWORD = os.getenv("APP_LOGIN_PASSWORD", "changeme")
+# Auth/session config
 AUTH_SECRET = os.getenv("APP_AUTH_SECRET", "set-a-secret-value")
 SESSION_TTL_SECONDS = int(os.getenv("APP_SESSION_TTL", str(7 * 24 * 3600)))
 COOKIE_NAME = os.getenv("APP_AUTH_COOKIE_NAME", "strava_auto_auth")
@@ -51,6 +50,9 @@ COOKIE_SAMESITE = os.getenv("APP_COOKIE_SAMESITE", "lax").lower() or "lax"
 AUTH_REQUIRED = os.getenv("APP_REQUIRE_LOGIN", "1") != "0"
 if APP_ENV == "test":
     AUTH_REQUIRED = False
+
+OAUTH_STATE_COOKIE = os.getenv("STRAVA_OAUTH_STATE_COOKIE", "strava_oauth_state")
+OAUTH_NEXT_COOKIE = os.getenv("STRAVA_OAUTH_NEXT_COOKIE", "strava_oauth_next")
 
 # Geocoding config
 GEOCODE_PROVIDER = os.getenv("GEOCODE_PROVIDER", "nominatim").lower()
@@ -113,14 +115,22 @@ class AutomationUpdate(BaseModel):
     effects: Optional[List[Effect]] = None
 
 
-class LoginPayload(BaseModel):
-    username: str
-    password: str
-
-
-class LoginResponseModel(BaseModel):
+class SessionInfo(BaseModel):
     authenticated: bool
+    athlete_id: Optional[int] = None
+    firstname: Optional[str] = None
+    lastname: Optional[str] = None
     username: Optional[str] = None
+
+
+class StravaWebhookEvent(BaseModel):
+    aspect_type: str
+    event_time: int
+    object_id: int
+    object_type: str
+    owner_id: int
+    subscription_id: int
+    updates: Optional[Dict[str, Any]] = None
 
 
 def _canonical_samesite(value: str) -> str:
@@ -132,16 +142,16 @@ def _canonical_samesite(value: str) -> str:
 COOKIE_SAMESITE = _canonical_samesite(COOKIE_SAMESITE)
 
 
-def _issue_session(username: str) -> Tuple[str, int]:
+def _issue_session(athlete_id: int) -> Tuple[str, int]:
     issued_at = int(time.time())
     nonce = secrets.token_hex(16)
-    payload = f"{username}:{issued_at}:{nonce}"
+    payload = f"{athlete_id}:{issued_at}:{nonce}"
     sig = hmac.new(AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     token = base64.urlsafe_b64encode(f"{payload}:{sig}".encode("utf-8")).decode("ascii")
     return token, issued_at
 
 
-def _verify_session_token(token: Optional[str]) -> Optional[str]:
+def _verify_session_token(token: Optional[str]) -> Optional[int]:
     if not token:
         return None
     try:
@@ -149,8 +159,8 @@ def _verify_session_token(token: Optional[str]) -> Optional[str]:
         parts = raw.split(":")
         if len(parts) != 4:
             return None
-        username, issued_at_raw, nonce, sig = parts
-        payload = f"{username}:{issued_at_raw}:{nonce}"
+        athlete_raw, issued_at_raw, nonce, sig = parts
+        payload = f"{athlete_raw}:{issued_at_raw}:{nonce}"
         expected = hmac.new(AUTH_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, sig):
             return None
@@ -159,9 +169,11 @@ def _verify_session_token(token: Optional[str]) -> Optional[str]:
             now = int(time.time())
             if now - issued_at > SESSION_TTL_SECONDS:
                 return None
-        if username != LOGIN_USERNAME:
+        try:
+            athlete_id = int(athlete_raw)
+        except Exception:
             return None
-        return username
+        return athlete_id
     except Exception:
         return None
 
@@ -202,9 +214,11 @@ app.add_middleware(
 )
 
 AUTH_EXEMPT_PATHS = {
-    "/api/login",
-    "/api/logout",
     "/api/session",
+    "/api/logout",
+    "/api/auth/strava/init",
+    "/api/auth/strava/callback",
+    "/api/webhooks/strava",
 }
 
 
@@ -220,13 +234,15 @@ async def _auth_guard(request: Request, call_next):
     if path in AUTH_EXEMPT_PATHS:
         return await call_next(request)
     token = request.cookies.get(COOKIE_NAME)
-    username = _verify_session_token(token)
-    if not username:
+    athlete_id = _verify_session_token(token)
+    if not athlete_id:
         return JSONResponse({"detail": "Authentication required"}, status_code=status.HTTP_401_UNAUTHORIZED)
-    request.state.authenticated_user = username
+    if not _load_user(int(athlete_id)):
+        return JSONResponse({"detail": "Authentication required"}, status_code=status.HTTP_401_UNAUTHORIZED)
+    request.state.athlete_id = int(athlete_id)
     response = await call_next(request)
     if SESSION_TTL_SECONDS > 0:
-        refreshed, _ = _issue_session(username)
+        refreshed, _ = _issue_session(athlete_id)
         _set_auth_cookie(response, refreshed)
     return response
 
@@ -238,14 +254,7 @@ def on_startup() -> None:
     except OperationalError as e:
         log.exception("Failed to initialize DB")
         raise e
-    # Start background scheduler for Strava polling
-    if os.getenv("DISABLE_SCHEDULER") == "1" or APP_ENV == "test":
-        log.info("Scheduler disabled by environment (DISABLE_SCHEDULER=1 or APP_ENV=test)")
-    else:
-        try:
-            start_scheduler(engine)
-        except Exception as e:  # noqa: BLE001
-            log.exception("Failed to start scheduler: %s", e)
+    log.info("API startup complete")
 
 
 # -----------------------------------------------------------------------------
@@ -273,6 +282,51 @@ def _coerce_dt(val: Any) -> datetime:
     return datetime.fromisoformat(str(val)).replace(tzinfo=timezone.utc)
 
 
+def _load_user(athlete_id: int) -> Optional[Dict[str, Any]]:
+    with engine.connect() as conn:
+        row = conn.execute(
+            sql_text(
+                "SELECT athlete_id, firstname, lastname, username FROM users WHERE athlete_id = :aid"
+            ),
+            {"aid": athlete_id},
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "athlete_id": int(row.athlete_id),
+        "firstname": row.firstname,
+        "lastname": row.lastname,
+        "username": row.username,
+    }
+
+
+def _get_athlete_id(request: Request) -> int:
+    athlete_id = getattr(request.state, "athlete_id", None)
+    if not athlete_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    return int(athlete_id)
+
+
+def _parse_since_epoch(raw: Optional[str]) -> Optional[int]:
+    if not raw:
+        return None
+    txt = str(raw).strip()
+    if not txt:
+        return None
+    if txt.isdigit():
+        return int(txt)
+    try:
+        dt = datetime.fromisoformat(txt)
+    except Exception:
+        try:
+            dt = datetime.strptime(txt, "%Y-%m-%d")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid date: {txt}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
 # -----------------------------------------------------------------------------
 # Health & sanity endpoints
 # -----------------------------------------------------------------------------
@@ -297,38 +351,38 @@ def healthz() -> Dict[str, Any]:
             "has_client_id": bool(STRAVA_CLIENT_ID),
             "has_client_secret": bool(STRAVA_CLIENT_SECRET),
             "has_redirect_uri": bool(STRAVA_REDIRECT_URI),
+            "has_webhook_verify_token": bool(STRAVA_WEBHOOK_VERIFY_TOKEN),
+            "has_webhook_callback_url": bool(STRAVA_WEBHOOK_CALLBACK_URL),
         },
     }
 
 
 # -----------------------------------------------------------------------------
-# Simple login endpoints
+# Session endpoints (Strava OAuth)
 # -----------------------------------------------------------------------------
 
 
-@app.post("/api/login", response_model=LoginResponseModel)
-def login(payload: LoginPayload, response: Response) -> LoginResponseModel:
-    if payload.username != LOGIN_USERNAME or payload.password != LOGIN_PASSWORD:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    token, _ = _issue_session(LOGIN_USERNAME)
-    _set_auth_cookie(response, token)
-    return LoginResponseModel(authenticated=True, username=LOGIN_USERNAME)
-
-
-@app.post("/api/logout", response_model=LoginResponseModel)
-def logout(response: Response) -> LoginResponseModel:
+@app.post("/api/logout", response_model=SessionInfo)
+def logout(response: Response) -> SessionInfo:
     response.delete_cookie(COOKIE_NAME, path="/")
-    return LoginResponseModel(authenticated=False, username=None)
+    return SessionInfo(authenticated=False, athlete_id=None)
 
 
-@app.get("/api/session", response_model=LoginResponseModel)
-def session_status(request: Request, response: Response) -> LoginResponseModel:
-    username = _verify_session_token(request.cookies.get(COOKIE_NAME))
-    if not username:
+@app.get("/api/session", response_model=SessionInfo)
+def session_status(request: Request, response: Response) -> SessionInfo:
+    athlete_id = _verify_session_token(request.cookies.get(COOKIE_NAME))
+    if not athlete_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    token, _ = _issue_session(username)
+    token, _ = _issue_session(athlete_id)
     _set_auth_cookie(response, token)
-    return LoginResponseModel(authenticated=True, username=username)
+    user = _load_user(athlete_id)
+    return SessionInfo(
+        authenticated=True,
+        athlete_id=athlete_id,
+        firstname=(user or {}).get("firstname"),
+        lastname=(user or {}).get("lastname"),
+        username=(user or {}).get("username"),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -337,9 +391,10 @@ def session_status(request: Request, response: Response) -> LoginResponseModel:
 
 
 @app.get("/api/admin/ratelimit")
-def get_ratelimit_metrics() -> Dict[str, Any]:
+def get_ratelimit_metrics(request: Request) -> Dict[str, Any]:
     from .db import get_cooldown_detail as _get_cd_detail, get_setting as _get_setting
     from .timefmt import human_local_from_epoch as _hl
+    athlete_id = _get_athlete_id(request)
     now = int(datetime.now(timezone.utc).timestamp())
     cd_detail = _get_cd_detail()
     cd = int(cd_detail.get("until") or 0)
@@ -376,17 +431,20 @@ def get_ratelimit_metrics() -> Dict[str, Any]:
         if local:
             parts.append(f"until {local}")
         msg = "; ".join(parts)
-    next_sync_raw = _get_setting("scheduler_next_run_epoch", "0")
+    webhook_sub_id = _get_setting("strava_webhook_subscription_id", "") or ""
+    last_event_raw = _get_setting(f"strava_webhook_last_event_time:{int(athlete_id)}", "0")
+    last_event_activity_raw = _get_setting(f"strava_webhook_last_event_activity_id:{int(athlete_id)}", "0")
+    last_event_aspect = _get_setting(f"strava_webhook_last_event_aspect:{int(athlete_id)}", "") or ""
+    last_event_error = _get_setting(f"strava_webhook_last_error:{int(athlete_id)}", "") or ""
     try:
-        next_sync_epoch = int(next_sync_raw or 0)
+        last_event_epoch = int(last_event_raw or 0)
     except Exception:
-        next_sync_epoch = 0
-    interval_raw = _get_setting("scheduler_current_interval_sec", "0")
+        last_event_epoch = 0
     try:
-        current_interval_sec = int(interval_raw or 0)
+        last_event_activity_id = int(last_event_activity_raw or 0)
     except Exception:
-        current_interval_sec = 0
-    next_sync_local = _hl(next_sync_epoch) if next_sync_epoch else ""
+        last_event_activity_id = 0
+    last_event_local = _hl(last_event_epoch) if last_event_epoch else ""
     return {
         "now": now,
         "cooldown_until": int(cd or 0),
@@ -400,36 +458,14 @@ def get_ratelimit_metrics() -> Dict[str, Any]:
         "errors_429_15m": int(e15 or 0),
         "errors_429_24h": int(e24 or 0),
         "last_headers": hdrs,
-        "next_sync_epoch": next_sync_epoch,
-        "next_sync_local": next_sync_local,
-        "current_interval_sec": current_interval_sec,
-    }
-
-
-@app.get("/api/admin/polling_profile")
-def get_polling_profile() -> Dict[str, Any]:
-    profile = _scheduler._load_polling_profile()
-    if not profile:
-        profile = {}
-    intervals_map = profile.get("intervals") or {}
-    fallback = int(profile.get("fallback") or 0)
-    intervals: list[int] = []
-    for minute in range(1440):
-        val = intervals_map.get(minute)
-        if val is None:
-            val = intervals_map.get(str(minute))
-        if val is None:
-            val = fallback
-        try:
-            intervals.append(int(val))
-        except Exception:
-            intervals.append(fallback)
-    return {
-        "intervals": intervals,
-        "computed_at": profile.get("computed_at"),
-        "valid_until": profile.get("valid_until"),
-        "fallback": fallback,
-        "total_samples": profile.get("total_samples") or 0,
+        "webhook": {
+            "subscription_id": webhook_sub_id,
+            "last_event_epoch": last_event_epoch,
+            "last_event_local": last_event_local,
+            "last_activity_id": last_event_activity_id,
+            "last_event_aspect": last_event_aspect,
+            "last_error": last_event_error,
+        },
     }
 
 
@@ -439,9 +475,10 @@ def get_polling_profile() -> Dict[str, Any]:
 
 
 @app.get("/api/counters")
-def get_counters() -> Dict[str, Any]:
+def get_counters(request: Request) -> Dict[str, Any]:
     from .db import list_counters as _list_counters
-    items = _list_counters()
+    athlete_id = _get_athlete_id(request)
+    items = _list_counters(athlete_id)
     return {"items": [{"key": k, "value": v} for (k, v) in items], "total": len(items)}
 
 
@@ -450,23 +487,26 @@ class CounterSetPayload(BaseModel):
 
 
 @app.patch("/api/counters/{key}")
-def set_single_counter(key: str, payload: CounterSetPayload) -> Dict[str, Any]:
+def set_single_counter(key: str, payload: CounterSetPayload, request: Request) -> Dict[str, Any]:
     from .db import set_counter as _set_counter
-    val = _set_counter(key, payload.value)
+    athlete_id = _get_athlete_id(request)
+    val = _set_counter(key, payload.value, athlete_id)
     return {"key": key, "value": val}
 
 
 @app.post("/api/counters/{key}/reset")
-def reset_single_counter(key: str) -> Dict[str, Any]:
+def reset_single_counter(key: str, request: Request) -> Dict[str, Any]:
     from .db import reset_counter as _reset_counter
-    _reset_counter(key)
+    athlete_id = _get_athlete_id(request)
+    _reset_counter(key, athlete_id)
     return {"key": key, "value": 0}
 
 
 @app.post("/api/counters/reset_all")
-def reset_counters_all() -> Dict[str, Any]:
+def reset_counters_all(request: Request) -> Dict[str, Any]:
     from .db import reset_all_counters as _reset_all_counters
-    n = _reset_all_counters()
+    athlete_id = _get_athlete_id(request)
+    n = _reset_all_counters(athlete_id)
     return {"reset": n}
 
 
@@ -476,26 +516,31 @@ def reset_counters_all() -> Dict[str, Any]:
 
 
 @app.get("/api/automations", response_model=List[Automation])
-def list_automations() -> List[Automation]:
+def list_automations(request: Request) -> List[Automation]:
+    athlete_id = _get_athlete_id(request)
     sql = """
     SELECT id, name, enabled, priority, conditions_json, effects_json, created_at, updated_at
     FROM automations
+    WHERE athlete_id = :aid
     ORDER BY priority DESC, created_at ASC
     """
     with engine.connect() as conn:
-        result: Result = conn.execute(sql_text(sql))
+        result: Result = conn.execute(sql_text(sql), {"aid": int(athlete_id)})
         rows = result.fetchall()
     return [_row_to_automation(r) for r in rows]
 
 
 @app.get("/api/automations/{automation_id}", response_model=Automation)
-def get_automation(automation_id: str) -> Automation:
+def get_automation(automation_id: str, request: Request) -> Automation:
+    athlete_id = _get_athlete_id(request)
     sql = """
     SELECT id, name, enabled, priority, conditions_json, effects_json, created_at, updated_at
-    FROM automations WHERE id = :id
+    FROM automations WHERE id = :id AND athlete_id = :aid
     """
     with engine.connect() as conn:
-        row = conn.execute(sql_text(sql), {"id": automation_id}).fetchone()
+        row = conn.execute(
+            sql_text(sql), {"id": automation_id, "aid": int(athlete_id)}
+        ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Automation not found")
     return _row_to_automation(row)
@@ -504,7 +549,8 @@ def get_automation(automation_id: str) -> Automation:
 @app.post(
     "/api/automations", response_model=Automation, status_code=status.HTTP_201_CREATED
 )
-def create_automation(payload: AutomationCreate) -> Automation:
+def create_automation(payload: AutomationCreate, request: Request) -> Automation:
+    athlete_id = _get_athlete_id(request)
     now = datetime.now(tz=timezone.utc)
     new_id = str(uuid.uuid4())
 
@@ -518,14 +564,15 @@ def create_automation(payload: AutomationCreate) -> Automation:
         raise HTTPException(status_code=422, detail=str(ve))
 
     sql = """
-    INSERT INTO automations (id, name, enabled, priority, conditions_json, effects_json, created_at, updated_at)
-    VALUES (:id, :name, :enabled, :priority, :conditions_json, :effects_json, :created_at, :updated_at)
+    INSERT INTO automations (id, athlete_id, name, enabled, priority, conditions_json, effects_json, created_at, updated_at)
+    VALUES (:id, :athlete_id, :name, :enabled, :priority, :conditions_json, :effects_json, :created_at, :updated_at)
     """
     with engine.begin() as conn:
         conn.execute(
             sql_text(sql),
             {
                 "id": new_id,
+                "athlete_id": int(athlete_id),
                 "name": payload.name,
                 "enabled": 1 if payload.enabled else 0,
                 "priority": payload.priority,
@@ -551,30 +598,34 @@ def create_automation(payload: AutomationCreate) -> Automation:
 
 
 @app.delete("/api/automations/{automation_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_automation(automation_id: str):
-    sql = "DELETE FROM automations WHERE id = :id"
+def delete_automation(automation_id: str, request: Request):
+    athlete_id = _get_athlete_id(request)
+    sql = "DELETE FROM automations WHERE id = :id AND athlete_id = :aid"
     with engine.begin() as conn:
-        result = conn.execute(sql_text(sql), {"id": automation_id})
+        result = conn.execute(
+            sql_text(sql), {"id": automation_id, "aid": int(athlete_id)}
+        )
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Automation not found")
 
 
 @app.patch("/api/automations/{automation_id}/enabled")
-def set_automation_enabled(automation_id: str, payload: AutomationEnablePayload) -> Dict[str, Any]:
+def set_automation_enabled(automation_id: str, payload: AutomationEnablePayload, request: Request) -> Dict[str, Any]:
     """
     Minimal toggle endpoint to flip `enabled` flag.
     Returns the updated state.
     """
+    athlete_id = _get_athlete_id(request)
     now = datetime.now(timezone.utc).isoformat()
     with engine.begin() as conn:
         res = conn.execute(
             sql_text(
                 """
                 UPDATE automations SET enabled = :en, updated_at = :now
-                WHERE id = :id
+                WHERE id = :id AND athlete_id = :aid
                 """
             ),
-            {"en": 1 if payload.enabled else 0, "now": now, "id": automation_id},
+            {"en": 1 if payload.enabled else 0, "now": now, "id": automation_id, "aid": int(athlete_id)},
         )
         if res.rowcount == 0:
             raise HTTPException(status_code=404, detail="Automation not found")
@@ -582,7 +633,8 @@ def set_automation_enabled(automation_id: str, payload: AutomationEnablePayload)
 
 
 @app.patch("/api/automations/{automation_id}", response_model=Automation)
-def update_automation(automation_id: str, payload: AutomationUpdate) -> Automation:
+def update_automation(automation_id: str, payload: AutomationUpdate, request: Request) -> Automation:
+    athlete_id = _get_athlete_id(request)
     # Validate nested structures if provided
     try:
         if payload.conditions is not None:
@@ -599,9 +651,9 @@ def update_automation(automation_id: str, payload: AutomationUpdate) -> Automati
     with engine.connect() as conn:
         row = conn.execute(
             sql_text(
-                "SELECT name, enabled, priority, conditions_json, effects_json, created_at, updated_at FROM automations WHERE id = :id"
+                "SELECT name, enabled, priority, conditions_json, effects_json, created_at, updated_at FROM automations WHERE id = :id AND athlete_id = :aid"
             ),
-            {"id": automation_id},
+            {"id": automation_id, "aid": int(athlete_id)},
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Automation not found")
@@ -627,11 +679,12 @@ def update_automation(automation_id: str, payload: AutomationUpdate) -> Automati
                   conditions_json = :conditions_json,
                   effects_json = :effects_json,
                   updated_at = :now
-                WHERE id = :id
+                WHERE id = :id AND athlete_id = :aid
                 """
             ),
             {
                 "id": automation_id,
+                "aid": int(athlete_id),
                 "name": next_name,
                 "enabled": next_enabled,
                 "priority": next_priority,
@@ -641,7 +694,7 @@ def update_automation(automation_id: str, payload: AutomationUpdate) -> Automati
             },
         )
 
-    return get_automation(automation_id)
+    return get_automation(automation_id, request)
 
 
 # -----------------------------------------------------------------------------
@@ -650,6 +703,7 @@ def update_automation(automation_id: str, payload: AutomationUpdate) -> Automati
 
 @app.get("/api/activities")
 def list_activities(
+    request: Request,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     sport: Optional[str] = Query(None, description="Filter by sport_type"),
@@ -660,15 +714,18 @@ def list_activities(
     Acceptance: GET /api/activities?limit=5&offset=0 returns total>=0 and len(items)<=5.
     """
     where = ""
-    params: Dict[str, Any] = {"limit": limit, "offset": offset}
+    athlete_id = _get_athlete_id(request)
+    params: Dict[str, Any] = {"limit": limit, "offset": offset, "aid": int(athlete_id)}
     sport_filter: Optional[str]
     if isinstance(sport, str):
         sport_filter = sport.strip()
     else:
         sport_filter = None
     if sport_filter:
-        where = "WHERE sport_type = :sport"
+        where = "WHERE sport_type = :sport AND athlete_id = :aid"
         params["sport"] = sport_filter
+    else:
+        where = "WHERE athlete_id = :aid"
     with engine.connect() as conn:
         total = conn.execute(
             sql_text(f"SELECT COUNT(*) AS c FROM activities {where}"), params
@@ -677,7 +734,7 @@ def list_activities(
             sql_text(
                 f"""
                 SELECT id, start_date, start_date_local, start_lat, start_lng, end_lat, end_lng,
-                       sport_type, name, distance,
+                       sport_type, name, device_name, distance,
                        moving_time, elapsed_time, total_elevation_gain, commute, workout_type, gear_id, hide_from_home
                 FROM activities
                 {where}
@@ -700,6 +757,7 @@ def list_activities(
             "end_lng": r.end_lng,
             "sport_type": r.sport_type,
             "name": r.name,
+            "device_name": r.device_name,
             "distance": r.distance,
             "moving_time": r.moving_time,
             "elapsed_time": r.elapsed_time,
@@ -715,24 +773,35 @@ def list_activities(
 
 
 @app.delete("/api/activities/{activity_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_activity(activity_id: int) -> Response:
+def delete_activity(activity_id: int, request: Request) -> Response:
     """Delete a single activity from the local DB only (does not touch Strava)."""
+    athlete_id = _get_athlete_id(request)
     with engine.begin() as conn:
-        res = conn.execute(sql_text("DELETE FROM activities WHERE id = :id"), {"id": activity_id})
+        res = conn.execute(
+            sql_text("DELETE FROM activities WHERE id = :id AND athlete_id = :aid"),
+            {"id": activity_id, "aid": int(athlete_id)},
+        )
         if res.rowcount == 0:
             raise HTTPException(status_code=404, detail="Activity not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/activities/clear")
-def clear_activities() -> Dict[str, int]:
+def clear_activities(request: Request) -> Dict[str, int]:
     """Delete all activities from the local DB. Returns deleted row count."""
+    athlete_id = _get_athlete_id(request)
     with engine.begin() as conn:
-        before = conn.execute(sql_text("SELECT COUNT(*) AS c FROM activities")).scalar_one()
-        conn.execute(sql_text("DELETE FROM activities"))
+        before = conn.execute(
+            sql_text("SELECT COUNT(*) AS c FROM activities WHERE athlete_id = :aid"),
+            {"aid": int(athlete_id)},
+        ).scalar_one()
+        conn.execute(
+            sql_text("DELETE FROM activities WHERE athlete_id = :aid"),
+            {"aid": int(athlete_id)},
+        )
     # Reset the ingestion cursor so a subsequent ingest repopulates from scratch
     try:
-        set_setting("last_seen_activity_time", "0")
+        set_setting(f"last_seen_activity_time:{int(athlete_id)}", "0")
     except Exception:
         pass
     return {"deleted": int(before)}
@@ -754,7 +823,7 @@ def root() -> Dict[str, str]:
 
 
 @app.get("/api/auth/strava/init")
-def strava_auth_init() -> Dict[str, str]:
+def strava_auth_init(response: Response, next: Optional[str] = None) -> Dict[str, str]:
     """
     Build Strava OAuth URL with scopes: activity:read_all,activity:write
 
@@ -763,20 +832,44 @@ def strava_auth_init() -> Dict[str, str]:
     client = StravaClient(engine)
     # Request profile:read_all to reliably fetch athlete gear (shoes/bikes)
     scopes = ["activity:read_all", "activity:write", "profile:read_all"]
-    url = client.build_auth_url(scopes)
+    state = secrets.token_urlsafe(16)
+    response.set_cookie(
+        OAUTH_STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="none" if COOKIE_SAMESITE == "none" else COOKIE_SAMESITE,
+        path="/",
+    )
+    if next:
+        response.set_cookie(
+            OAUTH_NEXT_COOKIE,
+            next,
+            max_age=600,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite="none" if COOKIE_SAMESITE == "none" else COOKIE_SAMESITE,
+            path="/",
+        )
+    url = client.build_auth_url(scopes, state=state)
     return {"auth_url": url}
 
 
 @app.get("/api/auth/strava/status")
-def strava_auth_status() -> Dict[str, Optional[Any]]:
+def strava_auth_status(request: Request) -> Dict[str, Optional[Any]]:
     """
-    Show whether Strava is connected and token expiry.
+    Show whether Strava is connected and token expiry for the current user.
     """
+    athlete_id = getattr(request.state, "athlete_id", None)
+    if not athlete_id:
+        return {"connected": False, "expires_at": None, "scope": None}
     with engine.connect() as conn:
         row = conn.execute(
             sql_text(
-                "SELECT expires_at, scope FROM oauth_tokens WHERE provider='strava'"
-            )
+                "SELECT expires_at, scope FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+            ),
+            {"aid": int(athlete_id)},
         ).fetchone()
     if not row:
         return {"connected": False, "expires_at": None, "scope": None}
@@ -789,7 +882,10 @@ def strava_auth_status() -> Dict[str, Optional[Any]]:
 
 @app.get("/api/auth/strava/callback")
 async def strava_auth_callback(
-    request: Request, code: Optional[str] = None, scope: Optional[str] = None
+    request: Request,
+    code: Optional[str] = None,
+    scope: Optional[str] = None,
+    state: Optional[str] = None,
 ) -> Any:
     """
     OAuth redirect handler: exchanges code for tokens and stores them.
@@ -800,46 +896,318 @@ async def strava_auth_callback(
     """
     if not code:
         raise HTTPException(status_code=400, detail="Missing code")
+    state_cookie = request.cookies.get(OAUTH_STATE_COOKIE)
+    if not state_cookie or not state or state_cookie != state:
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
     client = StravaClient(engine)
     try:
-        tok = await client.exchange_code_for_token(code)
+        tok, athlete = await client.exchange_code_for_token(code)
     except Exception as e:  # noqa: BLE001
         # Redirect back to frontend with error indicator
         url = f"{FRONTEND_BASE_URL}/?connected=0&error=oauth"
         return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    # Upsert user profile
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO users (athlete_id, firstname, lastname, username, created_at, updated_at)
+                    VALUES (:aid, :fn, :ln, :un, :now, :now)
+                    ON CONFLICT(athlete_id) DO UPDATE SET
+                      firstname = excluded.firstname,
+                      lastname = excluded.lastname,
+                      username = excluded.username,
+                      updated_at = excluded.updated_at
+                    """
+                ),
+                {
+                    "aid": int(tok.athlete_id or 0),
+                    "fn": (athlete or {}).get("firstname"),
+                    "ln": (athlete or {}).get("lastname"),
+                    "un": (athlete or {}).get("username"),
+                    "now": now_iso,
+                },
+            )
+    except Exception:
+        pass
+    token, _ = _issue_session(int(tok.athlete_id or 0))
+    def _apply_oauth_cookies(resp: Response) -> Response:
+        _set_auth_cookie(resp, token)
+        resp.delete_cookie(OAUTH_STATE_COOKIE, path="/")
+        resp.delete_cookie(OAUTH_NEXT_COOKIE, path="/")
+        return resp
     # Success: redirect to frontend root with a simple flag
     accept = request.headers.get("accept", "")
     ua = request.headers.get("user-agent", "")
     wants_json = "application/json" in accept.lower()
     is_test_client = "testclient" in ua.lower()
     if wants_json or is_test_client:
-        return {
+        resp = JSONResponse(
+            {
             "athlete_id": tok.athlete_id,
             "scope": getattr(tok, "scope", None),
-        }
-    url = f"{FRONTEND_BASE_URL}/?connected=1"
-    return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+            }
+        )
+        return _apply_oauth_cookies(resp)
+    next_cookie = request.cookies.get(OAUTH_NEXT_COOKIE)
+    url = f"{FRONTEND_BASE_URL}{next_cookie or '/'}?connected=1"
+    redirect = RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
+    return _apply_oauth_cookies(redirect)
 
 
 @app.post("/api/auth/strava/disconnect")
-def strava_auth_disconnect() -> Dict[str, Any]:
+def strava_auth_disconnect(request: Request, response: Response) -> Dict[str, Any]:
     """Disconnect Strava by removing stored tokens.
 
-    Frontend can call this to reset connection; scheduler will pause automatically.
+    Frontend can call this to reset connection; webhook processing will no-op without tokens.
     """
+    athlete_id = getattr(request.state, "athlete_id", None)
+    if not athlete_id:
+        return {"connected": False}
     with engine.begin() as conn:
-        conn.execute(sql_text("DELETE FROM oauth_tokens WHERE provider='strava'"))
+        conn.execute(
+            sql_text(
+                "DELETE FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+            ),
+            {"aid": int(athlete_id)},
+        )
+    # Best-effort cleanup of webhook subscription state
+    try:
+        from .db import set_setting as _set_setting
+
+        _set_setting("strava_webhook_subscription_id", "")
+        _set_setting(
+            f"strava_webhook_last_error:{int(athlete_id)}",
+            f"Disconnected athlete {athlete_id}",
+        )
+    except Exception:
+        pass
+    response.delete_cookie(COOKIE_NAME, path="/")
     return {"connected": False}
 
 
 # -----------------------------------------------------------------------------
-# Admin: trigger ingest now
+# Strava webhook endpoints + subscription management
 # -----------------------------------------------------------------------------
 
 
+@app.get("/api/webhooks/strava")
+def strava_webhook_verify(
+    hub_mode: str = Query(..., alias="hub.mode"),
+    hub_verify_token: str = Query(..., alias="hub.verify_token"),
+    hub_challenge: str = Query(..., alias="hub.challenge"),
+) -> Dict[str, str]:
+    from .db import get_setting as _get_setting
+
+    expected = STRAVA_WEBHOOK_VERIFY_TOKEN or _get_setting("strava_webhook_verify_token", "")
+    if not expected:
+        raise HTTPException(status_code=500, detail="Missing webhook verify token")
+    if hub_verify_token != expected:
+        raise HTTPException(status_code=403, detail="Invalid webhook verify token")
+    return {"hub.challenge": hub_challenge}
+
+
+@app.post("/api/webhooks/strava")
+async def strava_webhook_event(payload: StravaWebhookEvent) -> Dict[str, Any]:
+    event_id = f"{payload.subscription_id}:{payload.object_type}:{payload.object_id}:{payload.aspect_type}:{payload.event_time}"
+    payload_json = json.dumps(payload.model_dump(), separators=(",", ":"))
+    received_at = datetime.now(timezone.utc).isoformat()
+
+    inserted = 0
+    with engine.begin() as conn:
+        res = conn.execute(
+            sql_text(
+                """
+                INSERT INTO webhook_events (
+                  id, event_time, object_type, object_id, aspect_type, owner_id, subscription_id,
+                  payload_json, received_at, status
+                ) VALUES (
+                  :id, :event_time, :object_type, :object_id, :aspect_type, :owner_id, :subscription_id,
+                  :payload_json, :received_at, :status
+                )
+                ON CONFLICT(id) DO NOTHING
+                """
+            ),
+            {
+                "id": event_id,
+                "event_time": int(payload.event_time),
+                "object_type": payload.object_type,
+                "object_id": int(payload.object_id),
+                "aspect_type": payload.aspect_type,
+                "owner_id": int(payload.owner_id),
+                "subscription_id": int(payload.subscription_id),
+                "payload_json": payload_json,
+                "received_at": received_at,
+                "status": "received",
+            },
+        )
+        inserted = int(getattr(res, "rowcount", 0) or 0)
+
+    # Store last event metadata for UI
+    try:
+        aid = int(payload.owner_id)
+        set_setting(
+            f"strava_webhook_last_event_time:{aid}", str(int(payload.event_time))
+        )
+        set_setting(
+            f"strava_webhook_last_event_activity_id:{aid}",
+            str(int(payload.object_id)),
+        )
+        set_setting(
+            f"strava_webhook_last_event_aspect:{aid}", str(payload.aspect_type)
+        )
+        if payload.subscription_id:
+            set_setting("strava_webhook_subscription_id", str(int(payload.subscription_id)))
+    except Exception:
+        pass
+
+    if not inserted:
+        return {"status": "duplicate"}
+
+    result: Dict[str, Any]
+    error: Optional[str] = None
+    status_str = "processed"
+    try:
+        result = await _scheduler.process_webhook_event(  # type: ignore[attr-defined]
+            engine,
+            payload.model_dump(),
+        )
+    except Exception as e:  # noqa: BLE001
+        error = str(e)
+        status_str = "error"
+        result = {"handled": False, "error": error}
+
+    processed_at = datetime.now(timezone.utc).isoformat()
+    with engine.begin() as conn:
+        conn.execute(
+            sql_text(
+                """
+                UPDATE webhook_events
+                SET processed_at = :processed_at, status = :status, error = :error
+                WHERE id = :id
+                """
+            ),
+            {
+                "processed_at": processed_at,
+                "status": status_str,
+                "error": error,
+                "id": event_id,
+            },
+        )
+    if error:
+        try:
+            set_setting(f"strava_webhook_last_error:{int(payload.owner_id)}", error)
+        except Exception:
+            pass
+    else:
+        try:
+            set_setting(f"strava_webhook_last_error:{int(payload.owner_id)}", "")
+        except Exception:
+            pass
+    return {"status": status_str, "result": result}
+
+
+@app.get("/api/admin/webhooks/status")
+def webhook_status(request: Request) -> Dict[str, Any]:
+    from .db import get_setting as _get_setting
+    athlete_id = _get_athlete_id(request)
+    last_event_raw = _get_setting(f"strava_webhook_last_event_time:{int(athlete_id)}", "0")
+    last_activity_raw = _get_setting(f"strava_webhook_last_event_activity_id:{int(athlete_id)}", "0")
+    last_aspect = _get_setting(f"strava_webhook_last_event_aspect:{int(athlete_id)}", "") or ""
+    last_error = _get_setting(f"strava_webhook_last_error:{int(athlete_id)}", "") or ""
+    sub_id = _get_setting("strava_webhook_subscription_id", "") or ""
+    verify_token = STRAVA_WEBHOOK_VERIFY_TOKEN or _get_setting("strava_webhook_verify_token", "")
+    callback_url = STRAVA_WEBHOOK_CALLBACK_URL or _get_setting("strava_webhook_callback_url", "")
+    try:
+        last_event_epoch = int(last_event_raw or 0)
+    except Exception:
+        last_event_epoch = 0
+    try:
+        last_activity_id = int(last_activity_raw or 0)
+    except Exception:
+        last_activity_id = 0
+    last_event_local = human_local_from_epoch(last_event_epoch) if last_event_epoch else ""
+    return {
+        "subscription_id": sub_id,
+        "callback_url": callback_url,
+        "verify_token_set": bool(verify_token),
+        "last_event_epoch": last_event_epoch,
+        "last_event_local": last_event_local,
+        "last_activity_id": last_activity_id,
+        "last_event_aspect": last_aspect,
+        "last_error": last_error,
+    }
+
+
+@app.post("/api/admin/webhooks/subscribe")
+async def webhook_subscribe() -> Dict[str, Any]:
+    if not STRAVA_WEBHOOK_CALLBACK_URL:
+        raise HTTPException(status_code=400, detail="Missing STRAVA_WEBHOOK_CALLBACK_URL")
+    if not STRAVA_WEBHOOK_VERIFY_TOKEN:
+        raise HTTPException(status_code=400, detail="Missing STRAVA_WEBHOOK_VERIFY_TOKEN")
+    client = StravaClient(engine)
+    try:
+        data = await client.create_webhook_subscription(
+            STRAVA_WEBHOOK_CALLBACK_URL,
+            STRAVA_WEBHOOK_VERIFY_TOKEN,
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Failed to create subscription: {e}") from e
+    try:
+        set_setting("strava_webhook_subscription_id", str(data.get("id") or ""))
+        set_setting("strava_webhook_callback_url", STRAVA_WEBHOOK_CALLBACK_URL)
+        set_setting("strava_webhook_verify_token", STRAVA_WEBHOOK_VERIFY_TOKEN)
+    except Exception:
+        pass
+    return {"subscription": data}
+
+
+@app.post("/api/admin/webhooks/unsubscribe")
+async def webhook_unsubscribe() -> Dict[str, Any]:
+    from .db import get_setting as _get_setting
+
+    sub_id = _get_setting("strava_webhook_subscription_id", "") or ""
+    if not sub_id:
+        return {"deleted": False, "message": "No subscription id set"}
+    client = StravaClient(engine)
+    try:
+        await client.delete_webhook_subscription(int(sub_id))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Failed to delete subscription: {e}") from e
+    try:
+        set_setting("strava_webhook_subscription_id", "")
+    except Exception:
+        pass
+    return {"deleted": True, "subscription_id": sub_id}
+
+
+@app.get("/api/admin/webhooks/list")
+async def webhook_list() -> Dict[str, Any]:
+    client = StravaClient(engine)
+    try:
+        data = await client.list_webhook_subscriptions()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Failed to list subscriptions: {e}") from e
+    return {"items": data}
+
+
+# -----------------------------------------------------------------------------
+# Admin: manual sync now
+# -----------------------------------------------------------------------------
+
+
+class ManualSyncPayload(BaseModel):
+    since: Optional[str] = None
+
+
 @app.post("/api/admin/ingest")
-async def admin_run_ingest_now() -> Dict[str, Any]:
-    """Manually trigger a single ingest cycle with debug context."""
+async def admin_run_ingest_now(
+    request: Request, payload: Optional[ManualSyncPayload] = None
+) -> Dict[str, Any]:
+    """Manually trigger a sync cycle with debug context (optional `since`)."""
+    athlete_id = _get_athlete_id(request)
     cooldown_detail = get_cooldown_detail()
     cd_until = int(cooldown_detail.get("until") or 0)
     now = int(time.time())
@@ -858,22 +1226,34 @@ async def admin_run_ingest_now() -> Dict[str, Any]:
         }
     # Snapshot state before
     with engine.connect() as conn:
-        before = conn.execute(sql_text("SELECT COUNT(*) AS c FROM activities")).scalar_one()
+        before = conn.execute(
+            sql_text("SELECT COUNT(*) AS c FROM activities WHERE athlete_id = :aid"),
+            {"aid": int(athlete_id)},
+        ).scalar_one()
     from .db import get_setting as _get_setting
-    cur_before = _get_setting("last_seen_activity_time", "0")
+    cur_before = _get_setting(f"last_seen_activity_time:{int(athlete_id)}", "0")
+    since_epoch = _parse_since_epoch(payload.since) if payload and payload.since else None
     try:
-        inserted, updated, cursor = await _scheduler._ingest_activities(engine)  # type: ignore[attr-defined]
+        inserted, updated, cursor = await _scheduler._ingest_activities(  # type: ignore[attr-defined]
+            engine,
+            after=since_epoch,
+            athlete_id=athlete_id,
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Ingest failed: {e}") from e
     with engine.connect() as conn:
-        after = conn.execute(sql_text("SELECT COUNT(*) AS c FROM activities")).scalar_one()
-    cur_after = _get_setting("last_seen_activity_time", "0")
+        after = conn.execute(
+            sql_text("SELECT COUNT(*) AS c FROM activities WHERE athlete_id = :aid"),
+            {"aid": int(athlete_id)},
+        ).scalar_one()
+    cur_after = _get_setting(f"last_seen_activity_time:{int(athlete_id)}", "0")
     message = f"Ingested {inserted} new, {updated} updated"
     return {
         "inserted": inserted,
         "updated": updated,
         "cursor": cursor,
         "message": message,
+        "since": since_epoch,
         "debug": {
             "count_before": int(before),
             "count_after": int(after),
@@ -889,7 +1269,7 @@ class ReapplyCountersPayload(BaseModel):
 
 
 @app.post("/api/admin/reapply_counters")
-async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, Any]:
+async def admin_reapply_counters(request: Request, payload: ReapplyCountersPayload) -> Dict[str, Any]:
     """Re-evaluate activities against automations that include counter templates and apply.
 
     - Processes activities in ascending start_date order so counters increment chronologically.
@@ -897,7 +1277,8 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
     - Skips activities that do not match any counter-template automations.
     """
     # Load enabled automations and filter those that include a counter template in any set_title_template effect
-    autos = _load_enabled_automations()
+    athlete_id = _get_athlete_id(request)
+    autos = _load_enabled_automations(athlete_id)
     counter_autos: list[dict[str, Any]] = []
     for a in autos:
         try:
@@ -918,24 +1299,25 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
         if limit is None:
             rows = conn.execute(
                 sql_text(
-                    "SELECT id FROM activities ORDER BY datetime(COALESCE(start_date, updated_at)) ASC"
-                )
+                    "SELECT id FROM activities WHERE athlete_id = :aid ORDER BY datetime(COALESCE(start_date, updated_at)) ASC"
+                ),
+                {"aid": int(athlete_id)},
             ).fetchall()
         else:
             rows = conn.execute(
                 sql_text(
-                    "SELECT id FROM activities ORDER BY datetime(COALESCE(start_date, updated_at)) ASC LIMIT :lim"
+                    "SELECT id FROM activities WHERE athlete_id = :aid ORDER BY datetime(COALESCE(start_date, updated_at)) ASC LIMIT :lim"
                 ),
-                {"lim": int(limit)},
+                {"lim": int(limit), "aid": int(athlete_id)},
             ).fetchall()
     ids = [int(r.id) for r in rows]
     updated = 0
     skipped = 0
     applied_ids: list[int] = []
-    client = StravaClient(engine)
+    client = StravaClient(engine, athlete_id=athlete_id)
 
     for aid in ids:
-        activity = _load_activity_dict(aid)
+        activity = _load_activity_dict(aid, athlete_id)
         if not activity:
             skipped += 1
             continue
@@ -949,7 +1331,11 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
         matched_any = False
         for a in counter_autos:
             try:
-                if _scheduler._conditions_match(a.get("conditions", []), activity):  # type: ignore[attr-defined]
+                if _scheduler._conditions_match(  # type: ignore[attr-defined]
+                    a.get("conditions", []),
+                    activity,
+                    athlete_id=athlete_id,
+                ):
                     matched_any = True
                     (
                         desired_name,
@@ -986,7 +1372,11 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
         }
         desired_title_template = desired_name
         # Render counter placeholders
-        name_final = _render_title_preview_or_inc(desired_title_template, inc=not payload.dry_run)
+        name_final = _render_title_preview_or_inc(
+            desired_title_template,
+            inc=not payload.dry_run,
+            athlete_id=athlete_id,
+        )
         desired = {
             "name": name_final,
             "sport_type": desired_sport,
@@ -1019,7 +1409,7 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
                 description=changes.get("description"),
             )
         except Exception as e:  # noqa: BLE001
-            _insert_audit_run(aid, source="reapply", automation_ids=[], changes=changes, error=str(e))
+            _insert_audit_run(aid, athlete_id=int(athlete_id), source="reapply", automation_ids=[], changes=changes, error=str(e))
             skipped += 1
             continue
 
@@ -1036,11 +1426,12 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
                       workout_type = COALESCE(:workout_type, workout_type),
                       gear_id = COALESCE(:gear_id, gear_id),
                       updated_at = :now
-                    WHERE id = :id
+                    WHERE id = :id AND athlete_id = :aid
                     """
                 ),
                 {
                     "id": aid,
+                    "aid": int(athlete_id),
                     "name": name_final,
                     "sport_type": changes.get("sport_type"),
                     "commute": 1 if changes.get("commute") else 0 if changes.get("commute") is not None else None,
@@ -1049,7 +1440,163 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
                     "now": now_iso,
                 },
             )
-        _insert_audit_run(aid, source="reapply", automation_ids=[], changes=changes, error=None)
+        _insert_audit_run(aid, athlete_id=int(athlete_id), source="reapply", automation_ids=[], changes=changes, error=None)
+        updated += 1
+        applied_ids.append(aid)
+
+    return {"updated": updated, "skipped": skipped, "applied_ids": applied_ids, "dry_run": payload.dry_run}
+
+
+class ReapplyAutomationsPayload(BaseModel):
+    since: str
+    dry_run: bool = False
+    limit: Optional[int] = Field(default=None, ge=1, le=100000)
+
+
+@app.post("/api/admin/reapply_automations")
+async def admin_reapply_automations(request: Request, payload: ReapplyAutomationsPayload) -> Dict[str, Any]:
+    """Re-apply automations to activities on/after a given date."""
+    athlete_id = _get_athlete_id(request)
+    since_epoch = _parse_since_epoch(payload.since)
+    if since_epoch is None:
+        raise HTTPException(status_code=400, detail="Missing since date")
+    since_iso = datetime.fromtimestamp(since_epoch, tz=timezone.utc).isoformat()
+
+    autos = _load_enabled_automations(athlete_id)
+    if not autos:
+        return {"updated": 0, "skipped": 0, "applied_ids": [], "dry_run": payload.dry_run}
+
+    limit = payload.limit
+    with engine.connect() as conn:
+        if limit is None:
+            rows = conn.execute(
+                sql_text(
+                    """
+                    SELECT id FROM activities
+                    WHERE athlete_id = :aid AND datetime(COALESCE(start_date, start_date_local, updated_at)) >= datetime(:since)
+                    ORDER BY datetime(COALESCE(start_date, start_date_local, updated_at)) ASC
+                    """
+                ),
+                {"since": since_iso, "aid": int(athlete_id)},
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                sql_text(
+                    """
+                    SELECT id FROM activities
+                    WHERE athlete_id = :aid AND datetime(COALESCE(start_date, start_date_local, updated_at)) >= datetime(:since)
+                    ORDER BY datetime(COALESCE(start_date, start_date_local, updated_at)) ASC
+                    LIMIT :lim
+                    """
+                ),
+                {"since": since_iso, "lim": int(limit), "aid": int(athlete_id)},
+            ).fetchall()
+    ids = [int(r.id) for r in rows]
+
+    updated = 0
+    skipped = 0
+    applied_ids: list[int] = []
+    client = StravaClient(engine, athlete_id=athlete_id)
+
+    for aid in ids:
+        activity = _load_activity_dict(aid, athlete_id)
+        if not activity:
+            skipped += 1
+            continue
+        desired, matched, tpl_present, tpl_value = _compute_desired_for_activity(
+            activity,
+            autos,
+            athlete_id=athlete_id,
+        )
+        # Render counter placeholders for preview without incrementing
+        if tpl_present and isinstance(activity.get("name"), str) and isinstance(desired.get("name"), str):
+            if tpl_value and _template_already_applied(activity["name"], tpl_value):
+                desired["name"] = activity["name"]
+            else:
+                desired["name"] = _render_title_preview_or_inc(
+                    desired.get("name"),
+                    inc=False,
+                    athlete_id=athlete_id,
+                )
+        else:
+            desired["name"] = _render_title_preview_or_inc(
+                desired.get("name"),
+                inc=False,
+                athlete_id=athlete_id,
+            )
+
+        prev = {
+            "name": activity.get("name"),
+            "sport_type": activity.get("sport_type"),
+            "commute": activity.get("commute"),
+            "workout_type": activity.get("workout_type"),
+            "gear_id": activity.get("gear_id"),
+            "hide_from_home": activity.get("hide_from_home"),
+            "description": None,
+        }
+        changes = {k: v for k, v in desired.items() if v != prev.get(k)}
+        if not changes:
+            skipped += 1
+            continue
+
+        if payload.dry_run:
+            updated += 1
+            applied_ids.append(aid)
+            continue
+
+        try:
+            await client.update_activity(
+                aid,
+                name=_render_title_preview_or_inc(
+                    changes.get("name"),
+                    inc=True,
+                    athlete_id=athlete_id,
+                ),
+                sport_type=changes.get("sport_type"),
+                commute=changes.get("commute"),
+                workout_type=changes.get("workout_type"),
+                gear_id=changes.get("gear_id"),
+                hide_from_home=changes.get("hide_from_home"),
+                description=changes.get("description"),
+            )
+        except Exception as e:  # noqa: BLE001
+            _insert_audit_run(aid, athlete_id=int(athlete_id), source="reapply", automation_ids=[m["id"] for m in matched], changes=changes, error=str(e))
+            skipped += 1
+            continue
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    """
+                    UPDATE activities SET
+                      name = COALESCE(:name, name),
+                      sport_type = COALESCE(:sport_type, sport_type),
+                      commute = COALESCE(:commute, commute),
+                      workout_type = COALESCE(:workout_type, workout_type),
+                      gear_id = COALESCE(:gear_id, gear_id),
+                      hide_from_home = COALESCE(:hide_from_home, hide_from_home),
+                      updated_at = :now
+                    WHERE id = :id AND athlete_id = :aid
+                    """
+                ),
+                {
+                    "id": aid,
+                    "aid": int(athlete_id),
+                    "name": _render_title_preview_or_inc(
+                        changes.get("name"),
+                        inc=False,
+                        athlete_id=athlete_id,
+                    ),
+                    "sport_type": changes.get("sport_type"),
+                    "commute": 1 if changes.get("commute") else 0 if changes.get("commute") is not None else None,
+                    "workout_type": changes.get("workout_type"),
+                    "gear_id": changes.get("gear_id"),
+                    "hide_from_home": 1 if changes.get("hide_from_home") else 0 if changes.get("hide_from_home") is not None else None,
+                    "now": now_iso,
+                },
+            )
+        _insert_audit_run(aid, athlete_id=int(athlete_id), source="reapply", automation_ids=[m["id"] for m in matched], changes=changes, error=None)
         updated += 1
         applied_ids.append(aid)
 
@@ -1062,8 +1609,11 @@ async def admin_reapply_counters(payload: ReapplyCountersPayload) -> Dict[str, A
 
 
 @app.post("/api/activities/{activity_id}/refresh")
-async def refresh_activity_from_strava(activity_id: int) -> Dict[str, Any]:
+async def refresh_activity_from_strava(activity_id: int, request: Request) -> Dict[str, Any]:
     """Fetch latest Strava detail for a single activity and update the local row."""
+    athlete_id = _get_athlete_id(request)
+    if not _load_activity_dict(activity_id, athlete_id):
+        raise HTTPException(status_code=404, detail="Activity not found")
 
     cooldown_detail = get_cooldown_detail()
     cd_until = int(cooldown_detail.get("until") or 0)
@@ -1080,11 +1630,12 @@ async def refresh_activity_from_strava(activity_id: int) -> Dict[str, Any]:
             "cooldown": cooldown_detail,
         }
 
-    client = StravaClient(engine)
+    client = StravaClient(engine, athlete_id=athlete_id)
     result = await _scheduler.refresh_activity_detail(  # type: ignore[attr-defined]
         engine,
         client,
         activity_id,
+        athlete_id=athlete_id,
         respect_cooldown=False,
     )
 
@@ -1108,12 +1659,13 @@ async def refresh_activity_from_strava(activity_id: int) -> Dict[str, Any]:
 # -----------------------------------------------------------------------------
 
 
-def _load_enabled_automations() -> list[dict[str, Any]]:
+def _load_enabled_automations(athlete_id: int) -> list[dict[str, Any]]:
     with engine.connect() as conn:
         rows = conn.execute(
             sql_text(
-                "SELECT id, name, priority, conditions_json, effects_json FROM automations WHERE enabled=1 ORDER BY priority DESC, created_at ASC"
-            )
+                "SELECT id, name, priority, conditions_json, effects_json FROM automations WHERE enabled=1 AND athlete_id = :aid ORDER BY priority DESC, created_at ASC"
+            ),
+            {"aid": int(athlete_id)},
         ).fetchall()
     autos: list[dict[str, Any]] = []
     for r in rows:
@@ -1132,18 +1684,18 @@ def _load_enabled_automations() -> list[dict[str, Any]]:
     return autos
 
 
-def _load_activity_dict(activity_id: int) -> dict[str, Any] | None:
+def _load_activity_dict(activity_id: int, athlete_id: int) -> dict[str, Any] | None:
     with engine.connect() as conn:
         row = conn.execute(
             sql_text(
                 """
                 SELECT id, start_date, start_date_local, start_lat, start_lng, end_lat, end_lng,
-                       sport_type, name, distance,
+                       sport_type, name, device_name, distance,
                        moving_time, elapsed_time, total_elevation_gain, commute, workout_type, gear_id, hide_from_home
-                FROM activities WHERE id = :id
+                FROM activities WHERE id = :id AND athlete_id = :aid
                 """
             ),
-            {"id": activity_id},
+            {"id": activity_id, "aid": int(athlete_id)},
         ).fetchone()
     if not row:
         return None
@@ -1157,6 +1709,7 @@ def _load_activity_dict(activity_id: int) -> dict[str, Any] | None:
         "end_lng": row.end_lng,
         "sport_type": row.sport_type,
         "name": row.name,
+        "device_name": row.device_name,
         "distance": row.distance,
         "moving_time": row.moving_time,
         "elapsed_time": row.elapsed_time,
@@ -1168,59 +1721,98 @@ def _load_activity_dict(activity_id: int) -> dict[str, Any] | None:
     }
 
 
-@app.get("/api/activities/{activity_id}/preview")
-def preview_activity_automations(activity_id: int) -> Dict[str, Any]:
-    activity = _load_activity_dict(activity_id)
-    if not activity:
-        raise HTTPException(status_code=404, detail="Activity not found")
-    autos = _load_enabled_automations()
+def _compute_desired_for_activity(
+    activity: dict[str, Any],
+    automations: list[dict[str, Any]],
+    *,
+    athlete_id: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool, Optional[str]]:
     desired = {
-        "name": activity["name"],
-        "sport_type": activity["sport_type"],
+        "name": activity.get("name"),
+        "sport_type": activity.get("sport_type"),
         "commute": activity.get("commute"),
         "workout_type": activity.get("workout_type"),
         "gear_id": activity.get("gear_id"),
         "hide_from_home": None,
     }
     matched: list[dict[str, Any]] = []
-    if autos:
-        name = desired["name"]
-        sport = desired["sport_type"]
-        commute = desired["commute"]
-        wtype = desired["workout_type"]
-        gear = desired["gear_id"]
-        hide_home = None
-        hide_clubs = None
-        tpl_present = False
-        tpl_value: Optional[str] = None
-        for a in autos:
-            if _scheduler._conditions_match(a.get("conditions", []), activity):  # type: ignore[attr-defined]
-                matched.append({"id": a["id"], "name": a["name"]})
-                name, sport, commute, wtype, new_gear = _scheduler._apply_effects(a.get("effects", []), name, sport, commute, wtype)  # type: ignore[attr-defined]
-                if new_gear is not None:
-                    gear = new_gear
-                # Inspect effects for hide flags (simple pass)
-                for e in a.get("effects", []):
-                    if e.get("type") == "hide_from_feeds":
-                        p = e.get("params") or {}
-                        v_home = p.get("home", True)
-                        hide_home = bool(v_home)
-                        # Clubs param is currently ignored by Strava API; hide_from_home covers both feeds
-                    if e.get("type") == "set_title_template":
-                        tpl_present = True
-                        tpl_value = (e.get("params") or {}).get("template")
-                    if e.get("type") == "set_description":
-                        desired["description"] = (e.get("params") or {}).get("text")
-        desired = {"name": name, "sport_type": sport, "commute": commute, "workout_type": wtype, "gear_id": gear, "hide_from_home": hide_home}
+    name = desired["name"]
+    sport = desired["sport_type"]
+    commute = desired["commute"]
+    wtype = desired["workout_type"]
+    gear = desired["gear_id"]
+    hide_home = None
+    tpl_present = False
+    tpl_value: Optional[str] = None
+    for a in automations:
+        if _scheduler._conditions_match(  # type: ignore[attr-defined]
+            a.get("conditions", []),
+            activity,
+            athlete_id=athlete_id,
+        ):
+            matched.append({"id": a["id"], "name": a["name"]})
+            name, sport, commute, wtype, new_gear = _scheduler._apply_effects(  # type: ignore[attr-defined]
+                a.get("effects", []),
+                name,
+                sport,
+                commute,
+                wtype,
+            )
+            if new_gear is not None:
+                gear = new_gear
+            for e in a.get("effects", []):
+                if e.get("type") == "hide_from_feeds":
+                    p = e.get("params") or {}
+                    v_home = p.get("home", True)
+                    hide_home = bool(v_home)
+                if e.get("type") == "set_title_template":
+                    tpl_present = True
+                    tpl_value = (e.get("params") or {}).get("template")
+                if e.get("type") == "set_description":
+                    desired["description"] = (e.get("params") or {}).get("text")
+    description = desired.get("description")
+    desired = {
+        "name": name,
+        "sport_type": sport,
+        "commute": commute,
+        "workout_type": wtype,
+        "gear_id": gear,
+        "hide_from_home": hide_home,
+    }
+    if description is not None:
+        desired["description"] = description
+    return desired, matched, tpl_present, tpl_value
+
+
+@app.get("/api/activities/{activity_id}/preview")
+def preview_activity_automations(activity_id: int, request: Request) -> Dict[str, Any]:
+    athlete_id = _get_athlete_id(request)
+    activity = _load_activity_dict(activity_id, athlete_id)
+    if not activity:
+        raise HTTPException(status_code=404, detail="Activity not found")
+    autos = _load_enabled_automations(athlete_id)
+    desired, matched, tpl_present, tpl_value = _compute_desired_for_activity(
+        activity,
+        autos,
+        athlete_id=athlete_id,
+    )
     # Render any counter placeholders for preview without incrementing
     if tpl_present and isinstance(activity.get("name"), str) and isinstance(desired.get("name"), str):
         # If current already matches a rendered template pattern, show no change
         if tpl_value and _template_already_applied(activity["name"], tpl_value):
             desired["name"] = activity["name"]
         else:
-            desired["name"] = _render_title_preview_or_inc(desired.get("name"), inc=False)
+            desired["name"] = _render_title_preview_or_inc(
+                desired.get("name"),
+                inc=False,
+                athlete_id=athlete_id,
+            )
     else:
-        desired["name"] = _render_title_preview_or_inc(desired.get("name"), inc=False)
+        desired["name"] = _render_title_preview_or_inc(
+            desired.get("name"),
+            inc=False,
+            athlete_id=athlete_id,
+        )
     applies = desired != {
         "name": activity["name"],
         "sport_type": activity["sport_type"],
@@ -1232,8 +1824,9 @@ def preview_activity_automations(activity_id: int) -> Dict[str, Any]:
 
 
 @app.post("/api/activities/{activity_id}/apply")
-async def apply_activity_automations(activity_id: int) -> Dict[str, Any]:
-    activity = _load_activity_dict(activity_id)
+async def apply_activity_automations(activity_id: int, request: Request) -> Dict[str, Any]:
+    athlete_id = _get_athlete_id(request)
+    activity = _load_activity_dict(activity_id, athlete_id)
     if not activity:
         raise HTTPException(status_code=404, detail="Activity not found")
     prev = {
@@ -1245,16 +1838,20 @@ async def apply_activity_automations(activity_id: int) -> Dict[str, Any]:
         "hide_from_home": activity.get("hide_from_home"),
         "description": None,
     }
-    preview = preview_activity_automations(activity_id)
+    preview = preview_activity_automations(activity_id, request)
     desired = preview["desired"]
     changes = {k: v for k, v in desired.items() if v != prev.get(k)}
     if not changes:
         return {"updated": False, "changes": {}, "applies": False, "matched_automations": preview["matched_automations"]}
-    client = StravaClient(engine)
+    client = StravaClient(engine, athlete_id=athlete_id)
     try:
         await client.update_activity(
             activity_id,
-            name=_render_title_preview_or_inc(changes.get("name"), inc=True),
+            name=_render_title_preview_or_inc(
+                changes.get("name"),
+                inc=True,
+                athlete_id=athlete_id,
+            ),
             sport_type=changes.get("sport_type"),
             commute=changes.get("commute"),
             workout_type=changes.get("workout_type"),
@@ -1264,7 +1861,7 @@ async def apply_activity_automations(activity_id: int) -> Dict[str, Any]:
         )
     except Exception as e:  # noqa: BLE001
         # Record failed attempt
-        _insert_audit_run(activity_id, source="manual", automation_ids=[m["id"] for m in preview["matched_automations"]], changes=changes, error=str(e))
+        _insert_audit_run(activity_id, athlete_id=int(athlete_id), source="manual", automation_ids=[m["id"] for m in preview["matched_automations"]], changes=changes, error=str(e))
         raise HTTPException(status_code=502, detail=f"Failed to apply on Strava: {e}") from e
     # Mirror to local DB
     now = datetime.now(timezone.utc).isoformat()
@@ -1280,12 +1877,17 @@ async def apply_activity_automations(activity_id: int) -> Dict[str, Any]:
                   gear_id = COALESCE(:gear_id, gear_id),
                   hide_from_home = COALESCE(:hide_from_home, hide_from_home),
                   updated_at = :now
-                WHERE id = :id
+                WHERE id = :id AND athlete_id = :aid
                 """
             ),
             {
                 "id": activity_id,
-                "name": _render_title_preview_or_inc(changes.get("name"), inc=False),
+                "aid": int(athlete_id),
+                "name": _render_title_preview_or_inc(
+                    changes.get("name"),
+                    inc=False,
+                    athlete_id=athlete_id,
+                ),
                 "sport_type": changes.get("sport_type"),
                 "commute": 1 if changes.get("commute") else 0 if changes.get("commute") is not None else None,
                 "workout_type": changes.get("workout_type"),
@@ -1295,7 +1897,7 @@ async def apply_activity_automations(activity_id: int) -> Dict[str, Any]:
             },
         )
     # Record success
-    _insert_audit_run(activity_id, source="manual", automation_ids=[m["id"] for m in preview["matched_automations"]], changes=changes, error=None)
+    _insert_audit_run(activity_id, athlete_id=int(athlete_id), source="manual", automation_ids=[m["id"] for m in preview["matched_automations"]], changes=changes, error=None)
     return {"updated": True, "changes": changes, "applies": True, "matched_automations": preview["matched_automations"]}
 
 
@@ -1303,7 +1905,9 @@ import re
 _COUNT_RE_PREVIEW = re.compile(r"\{count:([A-Za-z0-9_\-]+)\}")
 
 
-def _render_title_preview_or_inc(name: Optional[str], *, inc: bool) -> Optional[str]:
+def _render_title_preview_or_inc(
+    name: Optional[str], *, inc: bool, athlete_id: Optional[int] = None
+) -> Optional[str]:
     if not name:
         return name
     if "{count:" not in name:
@@ -1313,9 +1917,9 @@ def _render_title_preview_or_inc(name: Optional[str], *, inc: bool) -> Optional[
         key = m.group(1)
         try:
             if inc:
-                return str(_inc_counter(key))
+                return str(_inc_counter(key, athlete_id))
             # preview: show next value without incrementing
-            return str((_get_counter(key) or 0) + 1)
+            return str((_get_counter(key, athlete_id) or 0) + 1)
         except Exception:
             return "0"
     return _COUNT_RE_PREVIEW.sub(repl, name)
@@ -1333,20 +1937,29 @@ def _template_already_applied(current: str, template: str) -> bool:
     return bool(pat.match(current or ""))
 
 
-def _insert_audit_run(activity_id: int, *, source: str, automation_ids: list[str], changes: dict[str, Any], error: str | None) -> None:
+def _insert_audit_run(
+    activity_id: int,
+    *,
+    athlete_id: Optional[int],
+    source: str,
+    automation_ids: list[str],
+    changes: dict[str, Any],
+    error: str | None,
+) -> None:
     rid = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with engine.begin() as conn:
         conn.execute(
             sql_text(
                 """
-                INSERT INTO automation_runs (id, activity_id, source, automation_ids, changes_json, error, created_at)
-                VALUES (:id, :aid, :src, :autos, :chg, :err, :now)
+                INSERT INTO automation_runs (id, activity_id, athlete_id, source, automation_ids, changes_json, error, created_at)
+                VALUES (:id, :aid, :athlete_id, :src, :autos, :chg, :err, :now)
                 """
             ),
             {
                 "id": rid,
                 "aid": activity_id,
+                "athlete_id": int(athlete_id) if athlete_id is not None else None,
                 "src": source,
                 "autos": json.dumps(automation_ids),
                 "chg": json.dumps(changes, separators=(",", ":")),
@@ -1357,19 +1970,20 @@ def _insert_audit_run(activity_id: int, *, source: str, automation_ids: list[str
 
 
 @app.get("/api/activities/{activity_id}/audit")
-def get_activity_audit(activity_id: int, limit: int = Query(20, ge=1, le=200)) -> Dict[str, Any]:
+def get_activity_audit(request: Request, activity_id: int, limit: int = Query(20, ge=1, le=200)) -> Dict[str, Any]:
+    athlete_id = _get_athlete_id(request)
     with engine.connect() as conn:
         rows = conn.execute(
             sql_text(
                 """
                 SELECT id, source, automation_ids, changes_json, error, created_at
                 FROM automation_runs
-                WHERE activity_id = :id
+                WHERE activity_id = :id AND athlete_id = :aid
                 ORDER BY datetime(created_at) DESC
                 LIMIT :limit
                 """
             ),
-            {"id": activity_id, "limit": limit},
+            {"id": activity_id, "limit": limit, "aid": int(athlete_id)},
         ).fetchall()
     items = [
         {
@@ -1390,7 +2004,8 @@ def get_activity_audit(activity_id: int, limit: int = Query(20, ge=1, le=200)) -
 
 
 @app.get("/api/gear/shoes")
-def get_shoe_stats() -> Dict[str, Any]:
+def get_shoe_stats(request: Request) -> Dict[str, Any]:
+    athlete_id = _get_athlete_id(request)
     with engine.connect() as conn:
         rows = (
             conn.execute(
@@ -1408,12 +2023,13 @@ def get_shoe_stats() -> Dict[str, Any]:
                         MIN(a.start_date) AS first_activity_at,
                         MAX(a.start_date) AS last_activity_at
                     FROM gear g
-                    LEFT JOIN activities a ON a.gear_id = g.id
-                    WHERE g.type = 'shoe'
+                    LEFT JOIN activities a ON a.gear_id = g.id AND a.athlete_id = :aid
+                    WHERE g.type = 'shoe' AND g.athlete_id = :aid
                     GROUP BY g.id, g.name, g.is_primary, g.distance
                     ORDER BY COALESCE(SUM(a.distance), 0) DESC, g.name
                     """
-                )
+                ),
+                {"aid": int(athlete_id)},
             )
             .mappings()
             .all()
@@ -1462,8 +2078,9 @@ def get_shoe_stats() -> Dict[str, Any]:
 
 
 @app.get("/api/athlete/gear")
-async def get_athlete_gear() -> Dict[str, Any]:
-    client = StravaClient(engine)
+async def get_athlete_gear(request: Request) -> Dict[str, Any]:
+    athlete_id = _get_athlete_id(request)
+    client = StravaClient(engine, athlete_id=athlete_id)
     try:
         data = await client.get_athlete_gear()
     except Exception as e:  # noqa: BLE001

@@ -47,13 +47,13 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         self.tmpdir.cleanup()
 
     async def test_build_auth_url_contains_params(self):
-        client = StravaClient(self.engine)
+        client = StravaClient(self.engine, athlete_id=42)
         url = client.build_auth_url(["activity:read_all", "activity:write"])
         self.assertIn("client_id=12345", url)
         self.assertIn("redirect_uri=http%3A%2F%2Flocalhost%2Fcallback", url)
 
     async def test_exchange_and_refresh_and_get_activities(self):
-        client = StravaClient(self.engine)
+        client = StravaClient(self.engine, athlete_id=42)
 
         # Patch HTTP POST for token exchange
         async def fake_post(url, data=None, **kwargs):
@@ -70,14 +70,17 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
             )
 
         client._http.post = fake_post  # type: ignore[method-assign]
-        t = await client.exchange_code_for_token("code123")
+        t, athlete = await client.exchange_code_for_token("code123")
         self.assertEqual(t.athlete_id, 42)
+        self.assertEqual(athlete.get("id"), 42)
 
         # Force expiry and refresh
         with self.engine.begin() as conn:
             conn.execute(
-                sql_text("UPDATE oauth_tokens SET expires_at = :e"),
-                {"e": int(time.time()) - 10},
+                sql_text(
+                    "UPDATE oauth_tokens SET expires_at = :e WHERE provider='strava' AND athlete_id = :aid"
+                ),
+                {"e": int(time.time()) - 10, "aid": 42},
             )
 
         async def fake_post_refresh(url, data=None, **kwargs):
@@ -102,8 +105,9 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
                 exp = (
                     conn.execute(
                         sql_text(
-                            "SELECT expires_at FROM oauth_tokens WHERE provider='strava'"
-                        )
+                            "SELECT expires_at FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+                        ),
+                        {"aid": 42},
                     ).scalar_one_or_none()
                 )
                 if exp:
@@ -139,14 +143,14 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(acts), 1)
 
     async def test_get_activities_retries_then_succeeds(self):
-        client = StravaClient(self.engine)
+        client = StravaClient(self.engine, athlete_id=42)
         # Seed a token row so client tries request
         with self.engine.begin() as conn:
             conn.execute(
                 sql_text(
-                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                    "INSERT INTO oauth_tokens(provider, athlete_id, access_token, refresh_token, expires_at) VALUES('strava', :aid, 'at','rt',:e)"
                 ),
-                {"e": int(time.time()) + 3600},
+                {"e": int(time.time()) + 3600, "aid": 42},
             )
 
         attempts = {"n": 0}
@@ -184,14 +188,14 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(attempts["n"], 3)
 
     async def test_activity_detail_request_logged(self):
-        client = StravaClient(self.engine)
+        client = StravaClient(self.engine, athlete_id=42)
         now = int(time.time())
         with self.engine.begin() as conn:
             conn.execute(
                 sql_text(
-                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                    "INSERT INTO oauth_tokens(provider, athlete_id, access_token, refresh_token, expires_at) VALUES('strava', :aid, 'at','rt',:e)"
                 ),
-                {"e": now + 3600},
+                {"e": now + 3600, "aid": 42},
             )
 
         async def fake_get(url, headers=None, params=None, **kwargs):
@@ -211,14 +215,14 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 1)
 
     async def test_activity_laps_request_logged(self):
-        client = StravaClient(self.engine)
+        client = StravaClient(self.engine, athlete_id=42)
         now = int(time.time())
         with self.engine.begin() as conn:
             conn.execute(
                 sql_text(
-                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                    "INSERT INTO oauth_tokens(provider, athlete_id, access_token, refresh_token, expires_at) VALUES('strava', :aid, 'at','rt',:e)"
                 ),
-                {"e": now + 3600},
+                {"e": now + 3600, "aid": 42},
             )
 
         async def fake_get(url, headers=None, **kwargs):
@@ -238,14 +242,14 @@ class TestStravaClient(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(count, 1)
 
     async def test_epoch_fallback_logs_second_request(self):
-        client = StravaClient(self.engine)
+        client = StravaClient(self.engine, athlete_id=42)
         now = int(time.time())
         with self.engine.begin() as conn:
             conn.execute(
                 sql_text(
-                    "INSERT INTO oauth_tokens(provider, access_token, refresh_token, expires_at) VALUES('strava','at','rt',:e)"
+                    "INSERT INTO oauth_tokens(provider, athlete_id, access_token, refresh_token, expires_at) VALUES('strava', :aid, 'at','rt',:e)"
                 ),
-                {"e": now + 3600},
+                {"e": now + 3600, "aid": 42},
             )
 
         calls = {"n": 0}

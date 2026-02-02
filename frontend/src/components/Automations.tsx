@@ -38,7 +38,7 @@ export function Automations() {
 
   const [name, setName] = useState('')
   const [enabled, setEnabled] = useState(true)
-  const [priority, setPriority] = useState(0)
+  const [priority, setPriority] = useState('0')
   const [conditions, setConditions] = useState('[]')
   const [effects, setEffects] = useState('[]')
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -72,7 +72,7 @@ export function Automations() {
       const payload: AutomationCreate = {
         name: name.trim(),
         enabled,
-        priority: Number.isFinite(priority) ? priority : 0,
+        priority: Number.isFinite(Number(priority)) ? Number(priority) : 0,
         conditions: parsedConditions as CondType[],
         effects: parsedEffects as EffType[],
       }
@@ -83,7 +83,7 @@ export function Automations() {
     onSuccess: () => {
       setName('')
       setEnabled(true)
-      setPriority(0)
+      setPriority('0')
       setConditions('[]')
       setEffects('[]')
       setBuiltConds([])
@@ -166,7 +166,13 @@ export function Automations() {
           </label>
           <label style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end' }}>
             <span style={{ whiteSpace: 'nowrap', fontSize: 12, color: 'inherit' }}>Priority (higher runs first)</span>
-            <input type="number" value={priority} onChange={(e) => setPriority(parseInt(e.target.value || '0', 10))} style={{ width: 80 }} />
+            <input
+              type="number"
+              value={priority}
+              onChange={(e) => setPriority(e.target.value)}
+              placeholder="0"
+              style={{ width: 80 }}
+            />
           </label>
         </div>
         <div style={{ marginTop: 12 }}>
@@ -298,38 +304,42 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-        <select
-          value={type}
-          onChange={(e) => {
-            const t = e.target.value as ConditionKind
-            setType(t)
-            setOp(CONDITION_SPECS[t].ops[0])
-            if (t !== 'start_near' && t !== 'end_near') {
-              setAddr(''); setAddrOpts([]); setSelLat(null); setSelLon(null); setRadius('100')
-            }
-          }}
-        >
-          {Object.entries(CONDITION_SPECS).map(([k, spec]) => (
-            <option key={k} value={k}>{spec.label}</option>
-          ))}
-        </select>
-        {CONDITION_SPECS[type].ops.length > 1 && (
-          <select value={op} onChange={(e) => setOp(e.target.value as ConditionOp)}>
-            {CONDITION_SPECS[type].ops.map((o) => (
-              <option key={o} value={o}>{o}</option>
+      <div style={{ display: 'grid', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select
+            value={type}
+            onChange={(e) => {
+              const t = e.target.value as ConditionKind
+              setType(t)
+              setOp(CONDITION_SPECS[t].ops[0])
+              if (t !== 'start_near' && t !== 'end_near') {
+                setAddr(''); setAddrOpts([]); setSelLat(null); setSelLon(null); setRadius('100')
+              }
+            }}
+          >
+            {Object.entries(CONDITION_SPECS).map(([k, spec]) => (
+              <option key={k} value={k}>{spec.label}</option>
             ))}
           </select>
-        )}
-        {type !== 'day_of_week' && type !== 'start_near' && type !== 'end_near' && (
-          <input
-            value={val}
-            onChange={(e) => setVal(e.target.value)}
-            placeholder={CONDITION_SPECS[type].placeholder || 'value'}
-          />
-        )}
+          {CONDITION_SPECS[type].ops.length > 1 && (
+            <select value={op} onChange={(e) => setOp(e.target.value as ConditionOp)}>
+              {CONDITION_SPECS[type].ops.map((o) => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+          )}
+          {type !== 'day_of_week' && type !== 'start_near' && type !== 'end_near' && (
+            <input
+              value={val}
+              onChange={(e) => setVal(e.target.value)}
+              placeholder={CONDITION_SPECS[type].placeholder || 'value'}
+              style={{ flex: '1 1 220px' }}
+            />
+          )}
+          <button onClick={add}>Add</button>
+        </div>
         {(type === 'start_near' || type === 'end_near') && (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8, minWidth: 280, flex: '1 1 320px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
               <input
                 value={addr}
@@ -360,9 +370,8 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
                   const i = parseInt(e.target.value, 10)
                   const opt = addrOpts[i]
                   if (!opt) return
-                  // keep previous radius part if set
                   const parts = (val || '').split(',').map(s => s.trim())
-                  const r = parts.length >= 3 ? parts[2] : '100'
+                  const r = parts.length >= 3 && parts[2] ? parts[2] : '100'
                   setSelLat(opt.lat); setSelLon(opt.lon)
                   setVal(`${opt.lat},${opt.lon},${r}`)
                 }}
@@ -381,16 +390,24 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
                 min={1}
                 value={radius}
                 onChange={(e) => {
-                  const r = e.target.value || '100'
-                  setRadius(r)
+                  const next = e.target.value
+                  setRadius(next)
                   if (selLat != null && selLon != null) {
-                    setVal(`${selLat},${selLon},${r}`)
+                    if (next.trim()) {
+                      setVal(`${selLat},${selLon},${next}`)
+                    } else {
+                      setVal(`${selLat},${selLon}`)
+                    }
                   } else {
                     const parts = (val || '').split(',').map(s => s.trim())
-                    if (parts.length >= 2) setVal(`${parts[0]},${parts[1]},${r}`)
+                    if (parts.length >= 2) {
+                      const r = next.trim() || parts[2] || ''
+                      setVal(`${parts[0]},${parts[1]}${r ? `,${r}` : ''}`)
+                    }
                   }
                 }}
                 style={{ width: 120 }}
+                placeholder="100"
               />
             </div>
           </div>
@@ -398,7 +415,6 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
         {type === 'day_of_week' && (
           <DayMultiSelect value={selectedDays} onChange={setSelectedDays} />
         )}
-        <button onClick={add}>Add</button>
       </div>
       {value.length > 0 && (
         <div style={{ marginTop: 8, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
@@ -447,31 +463,48 @@ function BuilderEffects({ value, onChange }: { value: EffType[]; onChange: (v: E
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-        <select value={type} onChange={(e) => setType(e.target.value as EffectKind)}>
-          <option value="set_title_suffix">Set title suffix</option>
-          <option value="set_title_prefix">Set title prefix</option>
-          <option value="set_commute">Mark as commute</option>
-          <option value="set_sport_type">Set sport type</option>
-          <option value="set_long_run_tag">Mark as long run (Run only)</option>
-          <option value="set_shoes_by_id">Set shoes by ID</option>
-          <option value="set_title_template">Set title from template</option>
-          <option value="hide_from_feeds">Hide from feeds</option>
-          <option value="set_description">Set description</option>
-        </select>
+      <div style={{ display: 'grid', gap: 8, marginBottom: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <select value={type} onChange={(e) => setType(e.target.value as EffectKind)}>
+            <option value="set_title_suffix">Set title suffix</option>
+            <option value="set_title_prefix">Set title prefix</option>
+            <option value="set_commute">Mark as commute</option>
+            <option value="set_sport_type">Set sport type</option>
+            <option value="set_long_run_tag">Mark as long run (Run only)</option>
+            <option value="set_shoes_by_id">Set shoes by ID</option>
+            <option value="set_title_template">Set title from template</option>
+            <option value="hide_from_feeds">Hide from feeds</option>
+            <option value="set_description">Set description</option>
+          </select>
+          <button onClick={add}>Add</button>
+        </div>
         {(type === 'set_title_suffix' || type === 'set_sport_type') && (
-          <input value={val} onChange={(e) => setVal(e.target.value)} placeholder={type === 'set_title_suffix' ? 'e.g. 🚀' : 'e.g. Ride'} />
+          <input
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+            placeholder={type === 'set_title_suffix' ? 'e.g. 🚀' : 'e.g. Ride'}
+            style={{ maxWidth: 420 }}
+          />
         )}
         {type === 'set_title_template' && (
-          <input value={val} onChange={(e) => setVal(e.target.value)} placeholder={'e.g. Commute #{count:commute}'} />
+          <input
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+            placeholder={'e.g. Commute #{count:commute}'}
+            style={{ maxWidth: 420 }}
+          />
         )}
         {type === 'set_description' && (
-          <input value={val} onChange={(e) => setVal(e.target.value)} placeholder={'Description text'} />
+          <input
+            value={val}
+            onChange={(e) => setVal(e.target.value)}
+            placeholder={'Description text'}
+            style={{ maxWidth: 420 }}
+          />
         )}
         {type === 'set_shoes_by_id' && (
           <ShoesSelect onSelect={(gid) => setVal(gid)} />
         )}
-        <button onClick={add}>Add</button>
       </div>
       {value.length > 0 && (
         <div style={{ marginTop: 8, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
@@ -521,6 +554,7 @@ function EnabledToggle({ enabled, onChange }: { enabled: boolean; onChange: (nex
 
 type SampleForm = {
   name: string
+  deviceName: string
   sportType: string
   startDate: string
   startDateLocal: string
@@ -542,6 +576,7 @@ type PreviewActivity = Activity & { start_lat?: number | null; start_lng?: numbe
 function PreviewPanel({ conditions, effects }: { conditions: CondType[]; effects: EffType[] }) {
   const [sample, setSample] = useState<SampleForm>({
     name: 'Morning Run',
+    deviceName: 'Apple Watch',
     sportType: 'Run',
     startDate: '2024-01-01T10:00',
     startDateLocal: '2024-01-01T21:00',
@@ -577,6 +612,7 @@ function PreviewPanel({ conditions, effects }: { conditions: CondType[]; effects
     const base: PreviewActivity = {
       id: 1,
       name: sample.name || '',
+      device_name: sample.deviceName || null,
       sport_type: sample.sportType || null,
       start_date: sample.startDate ? toIso(sample.startDate) : null,
       start_date_local: sample.startDateLocal ? toIso(sample.startDateLocal) : null,
@@ -612,6 +648,10 @@ function PreviewPanel({ conditions, effects }: { conditions: CondType[]; effects
             <label style={{ display: 'grid', gap: 4 }}>
               <span style={{ fontSize: 12, color: 'var(--muted)' }}>Title</span>
               <input value={sample.name} onChange={(e) => updateSample('name', e.target.value)} />
+            </label>
+            <label style={{ display: 'grid', gap: 4 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>Device</span>
+              <input value={sample.deviceName} onChange={(e) => updateSample('deviceName', e.target.value)} />
             </label>
             <label style={{ display: 'grid', gap: 4 }}>
               <span style={{ fontSize: 12, color: 'var(--muted)' }}>Sport type</span>
@@ -821,7 +861,7 @@ function startEditFactory(
   setEditingId: (v: string | null) => void,
   setName: (v: string) => void,
   setEnabled: (v: boolean) => void,
-  setPriority: (v: number) => void,
+  setPriority: (v: string) => void,
   setBuiltConds: (v: CondType[]) => void,
   setBuiltEffs: (v: EffType[]) => void,
   setUseBuilder: (v: boolean) => void,
@@ -832,7 +872,7 @@ function startEditFactory(
     setEditingId(a.id)
     setName(a.name)
     setEnabled(a.enabled)
-    setPriority(a.priority)
+    setPriority(String(a.priority ?? 0))
     try {
       setBuiltConds(a.conditions as CondType[])
       setBuiltEffs(a.effects as EffType[])
@@ -854,7 +894,7 @@ function useEditHelpers(
     setEditingId(null)
     setName('')
     setEnabled(true)
-    setPriority(0)
+    setPriority('0')
     setUseBuilder(true)
     setConditions('[]')
     setEffects('[]')

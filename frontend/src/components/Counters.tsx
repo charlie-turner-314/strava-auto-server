@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { getCounters, resetCounter, resetAllCounters, reapplyCounters, setCounter } from '../lib/api'
+import { getCounters, resetCounter, resetAllCounters, reapplyCounters, reapplyAutomations, setCounter } from '../lib/api'
 import { useState } from 'react'
 
 export function Counters() {
@@ -7,6 +7,7 @@ export function Counters() {
   const list = useQuery({ queryKey: ['counters'], queryFn: getCounters, refetchInterval: 15000 })
   const [limit, setLimit] = useState<string>('')
   const [dryRun, setDryRun] = useState(true)
+  const [since, setSince] = useState<string>('')
   const [edits, setEdits] = useState<Record<string, string>>({})
 
   const resetOne = useMutation({
@@ -31,6 +32,12 @@ export function Counters() {
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['counters'] }),
   })
+  const reapplyAutos = useMutation({
+    mutationFn: async () => {
+      const lim = limit.trim() ? Number(limit) : undefined
+      return reapplyAutomations(since, dryRun, lim)
+    },
+  })
 
   return (
     <div>
@@ -39,7 +46,7 @@ export function Counters() {
       {list.isError && <div>Failed to load counters</div>}
       {!list.isLoading && !list.isError && (
         <>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
             <button onClick={() => resetAll.mutate()} disabled={resetAll.isPending}>Reset All</button>
             <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -54,6 +61,19 @@ export function Counters() {
                 {reapply.isPending ? (dryRun ? 'Simulating…' : 'Reapplying…') : (dryRun ? 'Simulate Reapply' : 'Reapply Now')}
               </button>
             </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>From date</span>
+              <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
+            </label>
+            <button
+              onClick={() => reapplyAutos.mutate()}
+              disabled={reapplyAutos.isPending || !since}
+              title='Reapply all automations from a given date'
+            >
+              {reapplyAutos.isPending ? (dryRun ? 'Simulating…' : 'Reapplying…') : (dryRun ? 'Simulate Reapply (Date)' : 'Reapply From Date')}
+            </button>
           </div>
           <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
             Stored value is the last value used; next automation run will use last + 1.
@@ -112,6 +132,11 @@ export function Counters() {
           {reapply.data && (
             <div style={{ marginTop: 8, color: 'var(--muted)' }}>
               Result: updated {reapply.data.updated}, skipped {reapply.data.skipped}
+            </div>
+          )}
+          {reapplyAutos.data && (
+            <div style={{ marginTop: 4, color: 'var(--muted)' }}>
+              Date result: updated {reapplyAutos.data.updated}, skipped {reapplyAutos.data.skipped}
             </div>
           )}
         </>

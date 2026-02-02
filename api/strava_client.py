@@ -16,7 +16,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from sqlalchemy import text as sql_text
@@ -32,6 +32,7 @@ API_ACTIVITIES_URL = "https://www.strava.com/api/v3/athlete/activities"
 API_ACTIVITY_URL_TMPL = "https://www.strava.com/api/v3/activities/{id}"
 API_ATHLETE_URL = "https://www.strava.com/api/v3/athlete"
 API_GEAR_URL_TMPL = "https://www.strava.com/api/v3/gear/{id}"
+PUSH_SUBSCRIPTIONS_URL = "https://www.strava.com/api/v3/push_subscriptions"
 
 
 @dataclass
@@ -56,14 +57,15 @@ class StravaClient:
     - Retries 429/5xx with small jittered backoff.
     """
 
-    def __init__(self, engine: Optional[Engine] = None) -> None:
+    def __init__(self, engine: Optional[Engine] = None, athlete_id: Optional[int] = None) -> None:
         self.engine = engine or get_engine()
         self.client_id = os.getenv("STRAVA_CLIENT_ID", "")
         self.client_secret = os.getenv("STRAVA_CLIENT_SECRET", "")
         self.redirect_uri = os.getenv("STRAVA_REDIRECT_URI", "")
+        self.athlete_id = athlete_id
         self._http = httpx.AsyncClient(timeout=20)
 
-    def build_auth_url(self, scopes: List[str]) -> str:
+    def build_auth_url(self, scopes: List[str], *, state: Optional[str] = None) -> str:
         """Build the Strava OAuth URL.
 
         Uses approval_prompt=auto, response_type=code.
@@ -77,6 +79,8 @@ class StravaClient:
             "approval_prompt": "auto",
             "scope": scope_str,
         }
+        if state:
+            params["state"] = state
         from urllib.parse import urlencode
 
         return f"https://www.strava.com/oauth/authorize?{urlencode(params)}"
@@ -95,13 +99,16 @@ class StravaClient:
             except Exception:
                 exp_val = 0
 
+        athlete_id = (data.get("athlete") or {}).get("id")
         token = TokenInfo(
             access_token=str(data.get("access_token", "")),
             refresh_token=str(data.get("refresh_token", "")),
             expires_at=exp_val,
             scope=str(data.get("scope", "")),
-            athlete_id=(data.get("athlete") or {}).get("id"),
+            athlete_id=athlete_id,
         )
+        if token.athlete_id is not None:
+            self.athlete_id = int(token.athlete_id)
         from datetime import datetime, timezone
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -123,9 +130,8 @@ class StravaClient:
                         refresh_token = :rt,
                         expires_at = :exp,
                         scope = :sc,
-                        athlete_id = :aid,
                         updated_at = :now
-                    WHERE provider = 'strava'
+                    WHERE provider = 'strava' AND athlete_id = :aid
                     """
                 ),
                 params,
@@ -134,15 +140,15 @@ class StravaClient:
                 conn.execute(
                     sql_text(
                         """
-                        INSERT INTO oauth_tokens (provider, access_token, refresh_token, expires_at, scope, athlete_id, created_at, updated_at)
-                        VALUES ('strava', :at, :rt, :exp, :sc, :aid, :now, :now)
+                        INSERT INTO oauth_tokens (provider, athlete_id, access_token, refresh_token, expires_at, scope, created_at, updated_at)
+                        VALUES ('strava', :aid, :at, :rt, :exp, :sc, :now, :now)
                         """
                     ),
                     params,
                 )
         return token
 
-    async def exchange_code_for_token(self, code: str) -> TokenInfo:
+    async def exchange_code_for_token(self, code: str) -> Tuple[TokenInfo, Dict[str, Any]]:
         """Exchange authorization code for tokens and persist them.
 
         POST https://www.strava.com/oauth/token with grant_type=authorization_code
@@ -165,16 +171,20 @@ class StravaClient:
             token.athlete_id,
             token.scope,
         )
-        return token
+        return token, (data.get("athlete") or {})
 
-    def _load_token_row(self) -> Optional[TokenInfo]:
+    def _load_token_row(self, athlete_id: Optional[int] = None) -> Optional[TokenInfo]:
         """Load the single Strava token row, using mappings for portability."""
+        aid = athlete_id if athlete_id is not None else self.athlete_id
+        if aid is None:
+            return None
         with self.engine.connect() as conn:
             row = (
                 conn.execute(
                     sql_text(
-                        "SELECT access_token, refresh_token, expires_at, scope, athlete_id FROM oauth_tokens WHERE provider='strava'"
-                    )
+                        "SELECT access_token, refresh_token, expires_at, scope, athlete_id FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+                    ),
+                    {"aid": int(aid)},
                 )
                 .mappings()
                 .fetchone()
@@ -191,9 +201,9 @@ class StravaClient:
                 ),
             )
 
-    async def refresh_token_if_needed(self) -> None:
+    async def refresh_token_if_needed(self, athlete_id: Optional[int] = None) -> None:
         """Refresh access token if it expires within 2 minutes."""
-        token = self._load_token_row()
+        token = self._load_token_row(athlete_id=athlete_id)
         if not token:
             return
         threshold = 120
@@ -216,6 +226,41 @@ class StravaClient:
         new_token = await self._save_token(data)
         ttl = new_token.expires_at - _now_epoch()
         log.info("Strava token refreshed, ttl=%ss", ttl)
+
+    async def create_webhook_subscription(
+        self, callback_url: str, verify_token: str
+    ) -> Dict[str, Any]:
+        payload = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "callback_url": callback_url,
+            "verify_token": verify_token,
+        }
+        resp = await self._http.post(PUSH_SUBSCRIPTIONS_URL, data=payload)
+        if resp.status_code >= 400:
+            detail = _safe_text(resp)
+            log.error("Create webhook subscription failed (%s): %s", resp.status_code, detail)
+            resp.raise_for_status()
+        return resp.json()
+
+    async def list_webhook_subscriptions(self) -> List[Dict[str, Any]]:
+        params = {"client_id": self.client_id, "client_secret": self.client_secret}
+        resp = await self._http.get(PUSH_SUBSCRIPTIONS_URL, params=params)
+        if resp.status_code >= 400:
+            detail = _safe_text(resp)
+            log.error("List webhook subscriptions failed (%s): %s", resp.status_code, detail)
+            resp.raise_for_status()
+        data = resp.json()
+        return list(data) if isinstance(data, list) else []
+
+    async def delete_webhook_subscription(self, subscription_id: int) -> None:
+        params = {"client_id": self.client_id, "client_secret": self.client_secret}
+        url = f"{PUSH_SUBSCRIPTIONS_URL}/{int(subscription_id)}"
+        resp = await self._http.delete(url, params=params)
+        if resp.status_code >= 400:
+            detail = _safe_text(resp)
+            log.error("Delete webhook subscription failed (%s): %s", resp.status_code, detail)
+            resp.raise_for_status()
 
     async def get_athlete_activities(
         self, after: Optional[int]

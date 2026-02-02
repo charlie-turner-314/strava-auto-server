@@ -5,7 +5,7 @@ Acceptance checks in repo request:
 - ensure_schema creates automations, oauth_tokens, activities, settings tables.
 - get_engine reads DATABASE_URL.
 
-Nice-to-have added: get_setting/set_setting for scheduler cursor.
+Nice-to-have added: get_setting/set_setting for sync cursor.
 """
 
 from __future__ import annotations
@@ -51,9 +51,21 @@ def ensure_schema() -> None:
     - activities (denormalized columns + raw_json)
     - settings (key/value)
     """
+    ddl_users = """
+    CREATE TABLE IF NOT EXISTS users (
+        athlete_id INTEGER PRIMARY KEY,
+        firstname TEXT,
+        lastname TEXT,
+        username TEXT,
+        created_at TIMESTAMP NOT NULL,
+        updated_at TIMESTAMP NOT NULL
+    );
+    """
+
     ddl_automations = """
     CREATE TABLE IF NOT EXISTS automations (
         id TEXT PRIMARY KEY,
+        athlete_id INTEGER NOT NULL,
         name TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         priority INTEGER NOT NULL DEFAULT 0,
@@ -66,20 +78,22 @@ def ensure_schema() -> None:
 
     ddl_oauth_tokens = """
     CREATE TABLE IF NOT EXISTS oauth_tokens (
-        provider TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        athlete_id INTEGER NOT NULL,
         access_token TEXT,
         refresh_token TEXT,
         expires_at INTEGER,
         scope TEXT,
-        athlete_id INTEGER,
         created_at TIMESTAMP,
-        updated_at TIMESTAMP
+        updated_at TIMESTAMP,
+        PRIMARY KEY (provider, athlete_id)
     );
     """
 
     ddl_activities = """
     CREATE TABLE IF NOT EXISTS activities (
         id INTEGER PRIMARY KEY,
+        athlete_id INTEGER,
         start_date TEXT,
         start_date_local TEXT,
         start_lat REAL,
@@ -88,6 +102,7 @@ def ensure_schema() -> None:
         end_lng REAL,
         sport_type TEXT,
         name TEXT,
+        device_name TEXT,
         distance REAL,
         moving_time INTEGER,
         elapsed_time INTEGER,
@@ -113,6 +128,7 @@ def ensure_schema() -> None:
     CREATE TABLE IF NOT EXISTS automation_runs (
         id TEXT PRIMARY KEY,
         activity_id INTEGER NOT NULL,
+        athlete_id INTEGER,
         source TEXT NOT NULL,
         automation_ids TEXT NOT NULL,
         changes_json TEXT NOT NULL,
@@ -132,6 +148,7 @@ def ensure_schema() -> None:
     ddl_gear = """
     CREATE TABLE IF NOT EXISTS gear (
         id TEXT PRIMARY KEY,
+        athlete_id INTEGER,
         name TEXT,
         type TEXT,
         is_primary INTEGER,
@@ -169,9 +186,28 @@ def ensure_schema() -> None:
     );
     """
 
+    ddl_webhook_events = """
+    CREATE TABLE IF NOT EXISTS webhook_events (
+        id TEXT PRIMARY KEY,
+        event_time INTEGER NOT NULL,
+        object_type TEXT NOT NULL,
+        object_id INTEGER NOT NULL,
+        aspect_type TEXT NOT NULL,
+        owner_id INTEGER,
+        subscription_id INTEGER,
+        payload_json TEXT,
+        received_at TIMESTAMP NOT NULL,
+        processed_at TIMESTAMP,
+        status TEXT,
+        error TEXT
+    );
+    """
+
     eng = get_engine()
     with eng.begin() as conn:
+        conn.execute(sql_text(ddl_users))
         conn.execute(sql_text(ddl_automations))
+        # Base table creation (migration handled below if legacy schema exists)
         conn.execute(sql_text(ddl_oauth_tokens))
         conn.execute(sql_text(ddl_activities))
         conn.execute(sql_text(ddl_settings))
@@ -180,6 +216,7 @@ def ensure_schema() -> None:
         conn.execute(sql_text(ddl_gear))
         conn.execute(sql_text(ddl_laps))
         conn.execute(sql_text(ddl_strava_req_log))
+        conn.execute(sql_text(ddl_webhook_events))
         # Lightweight index to speed up ordering by start_date
         conn.execute(
             sql_text(
@@ -192,12 +229,44 @@ def ensure_schema() -> None:
             )
         )
         conn.execute(
+            sql_text(
+                "CREATE INDEX IF NOT EXISTS idx_automations_athlete ON automations(athlete_id)"
+            )
+        )
+        conn.execute(
+            sql_text(
+                "CREATE INDEX IF NOT EXISTS idx_activities_athlete ON activities(athlete_id)"
+            )
+        )
+        conn.execute(
+            sql_text(
+                "CREATE INDEX IF NOT EXISTS idx_gear_athlete ON gear(athlete_id)"
+            )
+        )
+        conn.execute(
             sql_text("CREATE INDEX IF NOT EXISTS idx_req_ts ON strava_request_log(ts)")
         )
+        conn.execute(
+            sql_text(
+                "CREATE INDEX IF NOT EXISTS idx_webhook_event_time ON webhook_events(event_time)"
+            )
+        )
+        try:
+            conn.execute(
+                sql_text(
+                    "DELETE FROM settings WHERE key = 'scheduler_polling_profile'"
+                )
+            )
+        except Exception:
+            pass
         # Best-effort ensure new columns exist when upgrading an existing DB
         try:
             cols = conn.execute(sql_text("PRAGMA table_info(activities)")).fetchall()
             existing = {str(r[1]) for r in cols}  # r[1] is name
+            if "athlete_id" not in existing:
+                conn.execute(
+                    sql_text("ALTER TABLE activities ADD COLUMN athlete_id INTEGER")
+                )
             if "start_lat" not in existing:
                 conn.execute(
                     sql_text("ALTER TABLE activities ADD COLUMN start_lat REAL")
@@ -220,6 +289,10 @@ def ensure_schema() -> None:
                 )
             if "gear_id" not in existing:
                 conn.execute(sql_text("ALTER TABLE activities ADD COLUMN gear_id TEXT"))
+            if "device_name" not in existing:
+                conn.execute(
+                    sql_text("ALTER TABLE activities ADD COLUMN device_name TEXT")
+                )
             if "avg_cadence" not in existing:
                 conn.execute(
                     sql_text("ALTER TABLE activities ADD COLUMN avg_cadence REAL")
@@ -239,6 +312,98 @@ def ensure_schema() -> None:
         except Exception:
             # On non-SQLite backends, PRAGMA may fail; ignore as these are optional fields
             pass
+
+        try:
+            cols = conn.execute(sql_text("PRAGMA table_info(automations)")).fetchall()
+            existing = {str(r[1]) for r in cols}
+            if "athlete_id" not in existing:
+                conn.execute(
+                    sql_text("ALTER TABLE automations ADD COLUMN athlete_id INTEGER")
+                )
+        except Exception:
+            pass
+
+        try:
+            cols = conn.execute(
+                sql_text("PRAGMA table_info(automation_runs)")
+            ).fetchall()
+            existing = {str(r[1]) for r in cols}
+            if "athlete_id" not in existing:
+                conn.execute(
+                    sql_text("ALTER TABLE automation_runs ADD COLUMN athlete_id INTEGER")
+                )
+        except Exception:
+            pass
+
+        try:
+            cols = conn.execute(sql_text("PRAGMA table_info(gear)")).fetchall()
+            existing = {str(r[1]) for r in cols}
+            if "athlete_id" not in existing:
+                conn.execute(
+                    sql_text("ALTER TABLE gear ADD COLUMN athlete_id INTEGER")
+                )
+        except Exception:
+            pass
+
+        # Migrate oauth_tokens schema for multi-user support (SQLite-only best effort).
+        try:
+            cols = conn.execute(sql_text("PRAGMA table_info(oauth_tokens)")).fetchall()
+            if cols:
+                pk_cols = [str(r[1]) for r in cols if int(r[5] or 0) > 0]
+                has_athlete = any(str(r[1]) == "athlete_id" for r in cols)
+                if pk_cols == ["provider"] or not has_athlete:
+                    conn.execute(sql_text("ALTER TABLE oauth_tokens RENAME TO oauth_tokens_old"))
+                    conn.execute(sql_text(ddl_oauth_tokens))
+                    conn.execute(
+                        sql_text(
+                            """
+                            INSERT INTO oauth_tokens (provider, athlete_id, access_token, refresh_token, expires_at, scope, created_at, updated_at)
+                            SELECT provider, athlete_id, access_token, refresh_token, expires_at, scope, created_at, updated_at
+                            FROM oauth_tokens_old
+                            WHERE athlete_id IS NOT NULL
+                            """
+                        )
+                    )
+                    conn.execute(sql_text("DROP TABLE oauth_tokens_old"))
+        except Exception:
+            pass
+
+        # Backfill athlete_id for existing rows when possible (single-user upgrade).
+        try:
+            aid_row = conn.execute(
+                sql_text(
+                    "SELECT athlete_id FROM oauth_tokens WHERE provider='strava' LIMIT 1"
+                )
+            ).fetchone()
+            athlete_id = int(aid_row.athlete_id) if aid_row and aid_row.athlete_id is not None else None
+        except Exception:
+            athlete_id = None
+        if athlete_id is not None:
+            try:
+                conn.execute(
+                    sql_text(
+                        "UPDATE activities SET athlete_id = :aid WHERE athlete_id IS NULL"
+                    ),
+                    {"aid": athlete_id},
+                )
+                conn.execute(
+                    sql_text(
+                        "UPDATE automations SET athlete_id = :aid WHERE athlete_id IS NULL"
+                    ),
+                    {"aid": athlete_id},
+                )
+                conn.execute(
+                    sql_text(
+                        "UPDATE automation_runs SET athlete_id = :aid WHERE athlete_id IS NULL"
+                    ),
+                    {"aid": athlete_id},
+                )
+                conn.execute(
+                    sql_text("UPDATE gear SET athlete_id = :aid WHERE athlete_id IS NULL"),
+                    {"aid": athlete_id},
+                )
+            except Exception:
+                pass
     log.info("DB schema ensured (automations, oauth_tokens, activities, settings)")
 
 
@@ -360,13 +525,19 @@ def log_strava_request(
         )
 
 
-def get_counter(key: str) -> int:
+def _counter_key(key: str, athlete_id: Optional[int] = None) -> str:
+    if athlete_id is None:
+        return f"counter:{key}"
+    return f"counter:{int(athlete_id)}:{key}"
+
+
+def get_counter(key: str, athlete_id: Optional[int] = None) -> int:
     """Return current integer counter value for key (default 0)."""
     eng = get_engine()
     with eng.connect() as conn:
         row = conn.execute(
             sql_text("SELECT value FROM settings WHERE key = :k"),
-            {"k": f"counter:{key}"},
+            {"k": _counter_key(key, athlete_id)},
         ).fetchone()
         if not row:
             return 0
@@ -376,13 +547,13 @@ def get_counter(key: str) -> int:
             return 0
 
 
-def inc_counter(key: str) -> int:
+def inc_counter(key: str, athlete_id: Optional[int] = None) -> int:
     """Atomically increment and return the new counter value."""
     eng = get_engine()
     with eng.begin() as conn:
         row = conn.execute(
             sql_text("SELECT value FROM settings WHERE key = :k"),
-            {"k": f"counter:{key}"},
+            {"k": _counter_key(key, athlete_id)},
         ).fetchone()
         cur = 0
         if row and row.value is not None:
@@ -399,12 +570,12 @@ def inc_counter(key: str) -> int:
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """
             ),
-            {"k": f"counter:{key}", "v": str(nxt)},
+            {"k": _counter_key(key, athlete_id), "v": str(nxt)},
         )
     return nxt
 
 
-def set_counter(key: str, value: int) -> int:
+def set_counter(key: str, value: int, athlete_id: Optional[int] = None) -> int:
     """Set counter value for key and return the stored integer."""
     v = int(value)
     eng = get_engine()
@@ -417,23 +588,25 @@ def set_counter(key: str, value: int) -> int:
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """
             ),
-            {"k": f"counter:{key}", "v": str(v)},
+            {"k": _counter_key(key, athlete_id), "v": str(v)},
         )
     return v
 
 
-def list_counters() -> List[Tuple[str, int]]:
+def list_counters(athlete_id: Optional[int] = None) -> List[Tuple[str, int]]:
     """Return a list of (key, value) for all counters in settings.
 
     Keys are returned without the "counter:" prefix for display/API convenience.
     """
+    prefix = _counter_key("", athlete_id).rstrip(":")
     eng = get_engine()
     items: List[Tuple[str, int]] = []
     with eng.connect() as conn:
         rows = conn.execute(
             sql_text(
-                "SELECT key, value FROM settings WHERE key LIKE 'counter:%' ORDER BY key ASC"
-            )
+                "SELECT key, value FROM settings WHERE key LIKE :prefix ORDER BY key ASC"
+            ),
+            {"prefix": f"{prefix}%"},
         ).fetchall()
     for r in rows:
         k: str = str(r.key)
@@ -443,26 +616,31 @@ def list_counters() -> List[Tuple[str, int]]:
         except Exception:
             v = 0
         # strip prefix
-        if k.startswith("counter:"):
-            k = k[len("counter:") :]
+        if k.startswith(prefix + ":"):
+            k = k[len(prefix + ":") :]
         items.append((k, v))
     return items
 
 
-def reset_counter(key: str) -> None:
+def reset_counter(key: str, athlete_id: Optional[int] = None) -> None:
     """Delete a single counter so it resets to 0."""
     eng = get_engine()
     with eng.begin() as conn:
         conn.execute(
-            sql_text("DELETE FROM settings WHERE key = :k"), {"k": f"counter:{key}"}
+            sql_text("DELETE FROM settings WHERE key = :k"),
+            {"k": _counter_key(key, athlete_id)},
         )
 
 
-def reset_all_counters() -> int:
+def reset_all_counters(athlete_id: Optional[int] = None) -> int:
     """Delete all counter:* keys. Returns number of rows removed."""
+    prefix = _counter_key("", athlete_id).rstrip(":")
     eng = get_engine()
     with eng.begin() as conn:
-        res = conn.execute(sql_text("DELETE FROM settings WHERE key LIKE 'counter:%'"))
+        res = conn.execute(
+            sql_text("DELETE FROM settings WHERE key LIKE :prefix"),
+            {"prefix": f"{prefix}%"},
+        )
         # rowcount may be None on some DBs; coerce to int
         try:
             return int(getattr(res, "rowcount", 0) or 0)

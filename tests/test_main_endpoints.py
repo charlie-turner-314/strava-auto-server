@@ -1,11 +1,11 @@
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import text as sql_text
-
-os.environ['DISABLE_SCHEDULER'] = '0'  # allow testing scheduler branch
 
 from fastapi.testclient import TestClient  # type: ignore
 
@@ -16,9 +16,12 @@ class TestMainEndpoints(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, 'test.db')
         os.environ['DATABASE_URL'] = f'sqlite:///{self.db_path}'
         os.environ['APP_ENV'] = 'prod'
-        os.environ['APP_LOGIN_USERNAME'] = 'admin'
-        os.environ['APP_LOGIN_PASSWORD'] = 'changeme'
         os.environ['APP_AUTH_SECRET'] = 'test-secret'
+        os.environ['STRAVA_CLIENT_ID'] = '12345'
+        os.environ['STRAVA_CLIENT_SECRET'] = 'secret'
+        os.environ['STRAVA_REDIRECT_URI'] = 'http://example/cb'
+        os.environ['STRAVA_WEBHOOK_VERIFY_TOKEN'] = 'test-verify'
+        os.environ['STRAVA_WEBHOOK_CALLBACK_URL'] = 'https://example.com/webhooks'
         # Fresh import
         from api import db  # type: ignore
         db._engine = None  # type: ignore[attr-defined]
@@ -26,15 +29,8 @@ class TestMainEndpoints(unittest.TestCase):
         import importlib
         import api.main as main  # type: ignore
         main = importlib.reload(main)
-        # Monkeypatch start_scheduler after reload, before client enters lifespan
-        def fake_start_scheduler(_engine):
-            raise RuntimeError('boom')
-        main.start_scheduler = fake_start_scheduler  # type: ignore[attr-defined]
         self.client = TestClient(main.app)
         self.client.__enter__()
-        # Authenticate once for protected API calls
-        login_resp = self.client.post('/api/login', json={'username': 'admin', 'password': 'changeme'})
-        assert login_resp.status_code == 200, login_resp.text
         self.main = main
 
     def tearDown(self):
@@ -43,6 +39,50 @@ class TestMainEndpoints(unittest.TestCase):
         finally:
             self.client.close()
             self.tmpdir.cleanup()
+
+    def _login_with_strava(self, athlete_id: int = 42) -> None:
+        init_resp = self.client.get('/api/auth/strava/init')
+        assert init_resp.status_code == 200, init_resp.text
+        auth_url = init_resp.json()['auth_url']
+        state = parse_qs(urlparse(auth_url).query).get('state', [''])[0]
+        assert state, "Missing OAuth state param"
+
+        class DummyTok:
+            def __init__(self, aid: int):
+                self.athlete_id = aid
+                self.scope = "read,activity:read_all"
+
+        async def fake_exchange(self, code: str):  # type: ignore[no-redef]
+            now = int(time.time())
+            with self.engine.begin() as conn:
+                conn.execute(
+                    sql_text("DELETE FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"),
+                    {"aid": int(athlete_id)},
+                )
+                conn.execute(
+                    sql_text(
+                        """
+                        INSERT INTO oauth_tokens (provider, athlete_id, access_token, refresh_token, expires_at, scope)
+                        VALUES ('strava', :aid, :at, :rt, :exp, :sc)
+                        """
+                    ),
+                    {
+                        "aid": int(athlete_id),
+                        "at": "at",
+                        "rt": "rt",
+                        "exp": now + 3600,
+                        "sc": "read,activity:read_all",
+                    },
+                )
+            return DummyTok(athlete_id), {"id": athlete_id, "firstname": "Test", "lastname": "User", "username": "tester"}
+
+        orig_exchange = self.main.StravaClient.exchange_code_for_token
+        try:
+            self.main.StravaClient.exchange_code_for_token = fake_exchange  # type: ignore[attr-defined]
+            resp = self.client.get(f'/api/auth/strava/callback?code=abc&state={state}')
+            assert resp.status_code == 200, resp.text
+        finally:
+            self.main.StravaClient.exchange_code_for_token = orig_exchange  # type: ignore[attr-defined]
 
     def test_root_and_healthz(self):
         r = self.client.get('/')
@@ -74,73 +114,86 @@ class TestMainEndpoints(unittest.TestCase):
 
     def test_strava_auth_endpoints(self):
         # init returns URL with client_id and redirect
-        os.environ['STRAVA_CLIENT_ID'] = '12345'
-        os.environ['STRAVA_REDIRECT_URI'] = 'http://example/cb'
-        # Rebuild client to pick up env; direct call to function to avoid reload
         r = self.client.get('/api/auth/strava/init')
         self.assertEqual(r.status_code, 200)
         url = r.json()['auth_url']
         self.assertIn('client_id=12345', url)
         self.assertIn('redirect_uri=http%3A%2F%2Fexample%2Fcb', url)
 
-        # status when no tokens
+        # status requires auth
         r = self.client.get('/api/auth/strava/status')
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()['connected'], False)
+        self.assertEqual(r.status_code, 401)
 
         # callback missing code -> 400
         r = self.client.get('/api/auth/strava/callback')
         self.assertEqual(r.status_code, 400)
 
         # callback success with monkeypatch exchange
-        import types
+        state = parse_qs(urlparse(url).query).get('state', [''])[0]
         class DummyTok:
             athlete_id = 42
+            scope = "read"
         async def fake_exchange(self, code: str):  # type: ignore[no-redef]
-            return DummyTok()
+            now = int(time.time())
+            with self.engine.begin() as conn:
+                conn.execute(
+                    sql_text("DELETE FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"),
+                    {"aid": 42},
+                )
+                conn.execute(
+                    sql_text(
+                        """
+                        INSERT INTO oauth_tokens (provider, athlete_id, access_token, refresh_token, expires_at, scope)
+                        VALUES ('strava', :aid, :at, :rt, :exp, :sc)
+                        """
+                    ),
+                    {"aid": 42, "at": "at", "rt": "rt", "exp": now + 3600, "sc": "read"},
+                )
+            return DummyTok(), {"id": 42, "firstname": "Test", "lastname": "User", "username": "tester"}
         # Patch StravaClient.exchange_code_for_token on the instance created in endpoint
         # We cannot easily inject instance; instead monkeypatch the class method
         orig_exchange = self.main.StravaClient.exchange_code_for_token
         try:
             self.main.StravaClient.exchange_code_for_token = fake_exchange  # type: ignore[attr-defined]
-            r = self.client.get('/api/auth/strava/callback?code=abc')
+            r = self.client.get(f'/api/auth/strava/callback?code=abc&state={state}')
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.json()['athlete_id'], 42)
+            r = self.client.get('/api/auth/strava/status')
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()['connected'], True)
         finally:
             self.main.StravaClient.exchange_code_for_token = orig_exchange  # type: ignore[attr-defined]
 
-    def test_polling_profile_endpoint(self):
-        now = datetime.now(timezone.utc)
-        with self.main.engine.begin() as conn:
-            conn.execute(sql_text("DELETE FROM activities"))
-            conn.execute(
-                sql_text(
-                    """
-                    INSERT INTO activities (id, start_date, start_date_local, elapsed_time, raw_json, updated_at)
-                    VALUES (:id, :sd, :sdl, :elapsed, :raw, :updated)
-                    """
-                ),
-                {
-                    "id": 1,
-                    "sd": now.isoformat(),
-                    "sdl": now.astimezone().isoformat(),
-                    "elapsed": 120,
-                    "raw": "{}",
-                    "updated": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-
-        # Force computation so polling profile is populated
-        from api import scheduler as _scheduler  # type: ignore
-
-        _scheduler._compute_polling_profile(self.main.engine, default_interval=300)
-
-        r = self.client.get('/api/admin/polling_profile')
+    def test_webhook_verify_and_event(self):
+        # Verify handshake
+        r = self.client.get('/api/webhooks/strava?hub.mode=subscribe&hub.verify_token=test-verify&hub.challenge=abc123')
         self.assertEqual(r.status_code, 200)
-        data = r.json()
-        self.assertEqual(len(data['intervals']), 1440)
-        self.assertEqual(data['total_samples'], 1)
-        self.assertIn('fallback', data)
+        self.assertEqual(r.json()['hub.challenge'], 'abc123')
+
+        # Invalid token returns 403
+        r = self.client.get('/api/webhooks/strava?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=abc123')
+        self.assertEqual(r.status_code, 403)
+
+        # Event handler (stub process_webhook_event)
+        async def fake_process(_engine, _payload):  # type: ignore[no-redef]
+            return {"handled": True}
+        orig = self.main._scheduler.process_webhook_event
+        try:
+            self.main._scheduler.process_webhook_event = fake_process  # type: ignore[attr-defined]
+            payload = {
+                "aspect_type": "create",
+                "event_time": int(datetime.now(timezone.utc).timestamp()),
+                "object_id": 123,
+                "object_type": "activity",
+                "owner_id": 1,
+                "subscription_id": 99,
+                "updates": {},
+            }
+            r = self.client.post('/api/webhooks/strava', json=payload)
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()['status'], 'processed')
+        finally:
+            self.main._scheduler.process_webhook_event = orig  # type: ignore[attr-defined]
 
     def test_get_shoe_stats(self):
         now = datetime.now(timezone.utc)
@@ -150,12 +203,13 @@ class TestMainEndpoints(unittest.TestCase):
             conn.execute(
                 sql_text(
                     """
-                    INSERT INTO gear (id, name, type, is_primary, distance, created_at, updated_at)
-                    VALUES (:id, :name, :type, :is_primary, :distance, :created, :updated)
+                    INSERT INTO gear (id, athlete_id, name, type, is_primary, distance, created_at, updated_at)
+                    VALUES (:id, :aid, :name, :type, :is_primary, :distance, :created, :updated)
                     """
                 ),
                 {
                     "id": "shoe-1",
+                    "aid": 42,
                     "name": "Tempo Next",
                     "type": "shoe",
                     "is_primary": 1,
@@ -167,12 +221,13 @@ class TestMainEndpoints(unittest.TestCase):
             conn.execute(
                 sql_text(
                     """
-                    INSERT INTO gear (id, name, type, is_primary, distance, created_at, updated_at)
-                    VALUES (:id, :name, :type, :is_primary, :distance, :created, :updated)
+                    INSERT INTO gear (id, athlete_id, name, type, is_primary, distance, created_at, updated_at)
+                    VALUES (:id, :aid, :name, :type, :is_primary, :distance, :created, :updated)
                     """
                 ),
                 {
                     "id": "shoe-2",
+                    "aid": 42,
                     "name": "Daily Trainer",
                     "type": "shoe",
                     "is_primary": 0,
@@ -185,17 +240,18 @@ class TestMainEndpoints(unittest.TestCase):
                 sql_text(
                     """
                     INSERT INTO activities (
-                        id, start_date, start_date_local, sport_type, name,
+                        id, athlete_id, start_date, start_date_local, sport_type, name,
                         distance, moving_time, elapsed_time, total_elevation_gain,
                         avg_cadence, raw_json, updated_at, gear_id
                     )
-                    VALUES (:id, :start_date, :start_date_local, :sport_type, :name,
+                    VALUES (:id, :aid, :start_date, :start_date_local, :sport_type, :name,
                             :distance, :moving_time, :elapsed_time, :gain,
                             :avg_cadence, :raw_json, :updated_at, :gear_id)
                     """
                 ),
                 {
                     "id": 101,
+                    "aid": 42,
                     "start_date": now.isoformat(),
                     "start_date_local": now.isoformat(),
                     "sport_type": "Run",
@@ -214,17 +270,18 @@ class TestMainEndpoints(unittest.TestCase):
                 sql_text(
                     """
                     INSERT INTO activities (
-                        id, start_date, start_date_local, sport_type, name,
+                        id, athlete_id, start_date, start_date_local, sport_type, name,
                         distance, moving_time, elapsed_time, total_elevation_gain,
                         avg_cadence, raw_json, updated_at, gear_id
                     )
-                    VALUES (:id, :start_date, :start_date_local, :sport_type, :name,
+                    VALUES (:id, :aid, :start_date, :start_date_local, :sport_type, :name,
                             :distance, :moving_time, :elapsed_time, :gain,
                             :avg_cadence, :raw_json, :updated_at, :gear_id)
                     """
                 ),
                 {
                     "id": 102,
+                    "aid": 42,
                     "start_date": now.isoformat(),
                     "start_date_local": now.isoformat(),
                     "sport_type": "Run",
@@ -243,17 +300,18 @@ class TestMainEndpoints(unittest.TestCase):
                 sql_text(
                     """
                     INSERT INTO activities (
-                        id, start_date, start_date_local, sport_type, name,
+                        id, athlete_id, start_date, start_date_local, sport_type, name,
                         distance, moving_time, elapsed_time, total_elevation_gain,
                         avg_cadence, raw_json, updated_at, gear_id
                     )
-                    VALUES (:id, :start_date, :start_date_local, :sport_type, :name,
+                    VALUES (:id, :aid, :start_date, :start_date_local, :sport_type, :name,
                             :distance, :moving_time, :elapsed_time, :gain,
                             :avg_cadence, :raw_json, :updated_at, :gear_id)
                     """
                 ),
                 {
                     "id": 103,
+                    "aid": 42,
                     "start_date": now.isoformat(),
                     "start_date_local": now.isoformat(),
                     "sport_type": "Run",
@@ -269,6 +327,7 @@ class TestMainEndpoints(unittest.TestCase):
                 },
             )
 
+        self._login_with_strava()
         response = self.client.get('/api/gear/shoes')
         self.assertEqual(response.status_code, 200)
         payload = response.json()

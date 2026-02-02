@@ -38,16 +38,11 @@ export async function getAuthInit(): Promise<AuthInit> {
 
 export type SessionInfo = {
   authenticated: boolean;
+  athlete_id?: number | null;
+  firstname?: string | null;
+  lastname?: string | null;
   username?: string | null;
 };
-
-export async function login(username: string, password: string): Promise<SessionInfo> {
-  return http<SessionInfo>('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-}
 
 export async function logout(): Promise<SessionInfo> {
   return http<SessionInfo>('/api/logout', {
@@ -65,6 +60,7 @@ export type Activity = {
   start_date_local: string | null;
   sport_type: string | null;
   name: string | null;
+  device_name?: string | null;
   distance: number | null;
   moving_time: number | null;
   elapsed_time: number | null;
@@ -197,12 +193,18 @@ export type IngestResponse = {
   updated: number;
   cursor: number | null;
   message?: string;
+  since?: number | null;
   cooldown?: Record<string, unknown>;
   debug?: IngestDebug;
 }
 
-export async function runIngestNow(): Promise<IngestResponse> {
-  return http<IngestResponse>(`/api/admin/ingest`, { method: 'POST' })
+export async function runIngestNow(since?: string): Promise<IngestResponse> {
+  const body = since ? JSON.stringify({ since }) : undefined
+  return http<IngestResponse>(`/api/admin/ingest`, {
+    method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body,
+  })
 }
 
 export async function deleteActivity(id: number): Promise<void> {
@@ -283,25 +285,41 @@ export type RateLimitMetrics = {
   errors_429_15m: number;
   errors_429_24h: number;
   last_headers: { usage_min: number | null; usage_day: number | null; limit_min: number | null; limit_day: number | null; last_status: number | null } | null;
-  next_sync_epoch: number;
-  next_sync_local: string;
-  current_interval_sec: number;
+  webhook: {
+    subscription_id: string;
+    last_event_epoch: number;
+    last_event_local: string;
+    last_activity_id: number;
+    last_event_aspect: string;
+    last_error: string;
+  };
 }
 
 export async function getRateLimitMetrics(): Promise<RateLimitMetrics> {
   return http<RateLimitMetrics>('/api/admin/ratelimit')
 }
 
-export type PollingProfile = {
-  intervals: number[];
-  computed_at?: string | null;
-  valid_until?: number | null;
-  fallback: number;
-  total_samples: number;
+export type WebhookStatus = {
+  subscription_id: string;
+  callback_url: string;
+  verify_token_set: boolean;
+  last_event_epoch: number;
+  last_event_local: string;
+  last_activity_id: number;
+  last_event_aspect: string;
+  last_error: string;
 }
 
-export async function getPollingProfile(): Promise<PollingProfile> {
-  return http<PollingProfile>('/api/admin/polling_profile')
+export async function getWebhookStatus(): Promise<WebhookStatus> {
+  return http<WebhookStatus>('/api/admin/webhooks/status')
+}
+
+export async function subscribeWebhook(): Promise<{ subscription: Record<string, unknown> }> {
+  return http<{ subscription: Record<string, unknown> }>('/api/admin/webhooks/subscribe', { method: 'POST' })
+}
+
+export async function unsubscribeWebhook(): Promise<{ deleted: boolean; subscription_id?: string; message?: string }> {
+  return http<{ deleted: boolean; subscription_id?: string; message?: string }>('/api/admin/webhooks/unsubscribe', { method: 'POST' })
 }
 
 // Counters ------------------------------------------------------------------
@@ -331,6 +349,16 @@ export async function reapplyCounters(dryRun = false, limit?: number): Promise<{
   const body: Record<string, unknown> = { dry_run: Boolean(dryRun) }
   if (Number.isFinite(limit as number)) body.limit = Number(limit)
   return http<{ updated: number; skipped: number; applied_ids: number[]; dry_run: boolean }>(`/api/admin/reapply_counters`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+export async function reapplyAutomations(since: string, dryRun = false, limit?: number): Promise<{ updated: number; skipped: number; applied_ids: number[]; dry_run: boolean }> {
+  const body: Record<string, unknown> = { since, dry_run: Boolean(dryRun) }
+  if (Number.isFinite(limit as number)) body.limit = Number(limit)
+  return http<{ updated: number; skipped: number; applied_ids: number[]; dry_run: boolean }>(`/api/admin/reapply_automations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

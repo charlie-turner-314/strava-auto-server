@@ -1,0 +1,45 @@
+version: "3.9"
+
+name: strava-auto-server
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    image: ${API_IMAGE:-strava-auto-api}
+    environment:
+      APP_ENV: "prod"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      APP_AUTH_SECRET: "${APP_AUTH_SECRET}"
+      APP_REQUIRE_LOGIN: "${APP_REQUIRE_LOGIN:-1}"
+      APP_SESSION_TTL: "${APP_SESSION_TTL:-604800}"
+      APP_COOKIE_SECURE: "${APP_COOKIE_SECURE:-1}"
+      APP_COOKIE_SAMESITE: "${APP_COOKIE_SAMESITE:-lax}"
+      APP_AUTH_COOKIE_NAME: "${APP_AUTH_COOKIE_NAME:-strava_auto_auth}"
+      FRONTEND_BASE_URL: "${FRONTEND_BASE_URL}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-}"
+      DATABASE_URL: "sqlite:////data/app.db"
+      STRAVA_CLIENT_ID: "${STRAVA_CLIENT_ID}"
+      STRAVA_CLIENT_SECRET: "${STRAVA_CLIENT_SECRET}"
+      STRAVA_REDIRECT_URI: "${STRAVA_REDIRECT_URI}"
+      STRAVA_WEBHOOK_VERIFY_TOKEN: "${STRAVA_WEBHOOK_VERIFY_TOKEN}"
+      STRAVA_WEBHOOK_CALLBACK_URL: "${STRAVA_WEBHOOK_CALLBACK_URL}"
+    volumes:
+      - ./data:/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: "${VITE_API_BASE:-}"
+    image: ${FRONTEND_IMAGE:-strava-auto-frontend}
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: unless-stopped

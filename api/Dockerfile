@@ -1,25 +1,17 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.12-slim AS base
+FROM python:3.12-slim
 WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 
-# System deps you’ll likely need on Pi for building some wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates git \
+    build-essential ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-# If you use uv (fast Python package manager), great; fallback is pip
-# COPY uv.lock pyproject.toml ./
-# RUN pip install uv && uv sync --frozen --no-dev
-
-COPY pyproject.toml ./
+COPY api/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -U pip \
-    && pip wheel --no-deps --wheel-dir /wheels \
-    "fastapi[standard]" "uvicorn[standard]" "httpx>=0.27" \
-    "pydantic>=2.7" "SQLAlchemy>=2.0" "alembic>=1.13" \
-    "apscheduler>=3.10" "python-multipart>=0.0.9"
+    && pip install --no-cache-dir -r /app/requirements.txt
 
-COPY . .
-RUN pip install --no-cache-dir /wheels/*
+COPY api /app/api
 
 EXPOSE 8000
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

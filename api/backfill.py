@@ -9,6 +9,7 @@ Run: python -m api.backfill
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import time
 from typing import Any
@@ -66,12 +67,29 @@ async def _wait_for_cooldown(tag: str) -> None:
 async def backfill() -> None:
     ensure_schema()
     engine = get_engine()
-    client = StravaClient(engine)
+    athlete_id_raw = os.getenv("BACKFILL_ATHLETE_ID", "")
+    athlete_id: int | None
+    try:
+        athlete_id = int(athlete_id_raw) if athlete_id_raw else None
+    except Exception:
+        athlete_id = None
+    if athlete_id is None:
+        with engine.connect() as conn:
+            row = conn.execute(
+                sql_text(
+                    "SELECT athlete_id FROM oauth_tokens WHERE provider='strava' LIMIT 2"
+                )
+            ).fetchall()
+        if len(row) == 1 and row[0].athlete_id is not None:
+            athlete_id = int(row[0].athlete_id)
+    if athlete_id is None:
+        raise RuntimeError("BACKFILL_ATHLETE_ID is required for multi-user backfill")
+    client = StravaClient(engine, athlete_id=athlete_id)
 
     # Sync gear first (lifetime distances)
     try:
         await _wait_for_cooldown("gear sync")
-        await _scheduler._sync_gear(engine, client)  # type: ignore[attr-defined]
+        await _scheduler._sync_gear(engine, client, athlete_id=athlete_id)  # type: ignore[attr-defined]
     except Exception as e:  # noqa: BLE001
         log.warning("Gear sync failed: %s", e)
 
@@ -81,9 +99,11 @@ async def backfill() -> None:
             sql_text(
                 """
                 SELECT id, sport_type FROM activities
+                WHERE athlete_id = :aid
                 ORDER BY id DESC
                 """
-            )
+            ),
+            {"aid": int(athlete_id)},
         ).fetchall()
 
     for r in rows:
@@ -115,6 +135,7 @@ async def backfill() -> None:
         end_lat = float(end_ll[0]) if isinstance(end_ll, list) and len(end_ll) >= 2 and end_ll[0] is not None else None
         end_lng = float(end_ll[1]) if isinstance(end_ll, list) and len(end_ll) >= 2 and end_ll[1] is not None else None
         gear_id = detail.get("gear_id")
+        device_name = detail.get("device_name") or detail.get("device")
         distance = detail.get("distance")
         moving_time = detail.get("moving_time")
         elapsed_time = detail.get("elapsed_time")
@@ -140,6 +161,7 @@ async def backfill() -> None:
                       end_lat = COALESCE(:end_lat, end_lat),
                       end_lng = COALESCE(:end_lng, end_lng),
                       gear_id = COALESCE(:gear_id, gear_id),
+                      device_name = COALESCE(:device_name, device_name),
                       distance = COALESCE(:distance, distance),
                       moving_time = COALESCE(:moving_time, moving_time),
                       elapsed_time = COALESCE(:elapsed_time, elapsed_time),
@@ -147,16 +169,18 @@ async def backfill() -> None:
                       avg_cadence = COALESCE(:avg_cadence, avg_cadence),
                       avg_pace_s_per_km = COALESCE(:avg_pace, avg_pace_s_per_km),
                       detail_json = :detail_json
-                    WHERE id = :id
+                    WHERE id = :id AND athlete_id = :aid
                     """
                 ),
                 {
                     "id": aid,
+                    "aid": int(athlete_id),
                     "start_lat": start_lat,
                     "start_lng": start_lng,
                     "end_lat": end_lat,
                     "end_lng": end_lng,
                     "gear_id": gear_id,
+                    "device_name": device_name,
                     "distance": distance,
                     "moving_time": moving_time,
                     "elapsed_time": elapsed_time,

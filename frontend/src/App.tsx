@@ -7,8 +7,7 @@ import { NavTabs } from './components/NavTabs'
 import { ApplyAutomations } from './components/ApplyAutomations'
 import { Counters } from './components/Counters'
 import { ShoeStats } from './components/ShoeStats'
-import { LoginForm } from './components/LoginForm'
-import { getSession, logout } from './lib/api'
+import { getAuthInit, getSession, logout } from './lib/api'
 
 type TabKey = 'activities' | 'shoes' | 'automations' | 'apply' | 'counters'
 type AuthState = 'checking' | 'unauthenticated' | 'authenticated'
@@ -16,7 +15,7 @@ type AuthState = 'checking' | 'unauthenticated' | 'authenticated'
 export default function App() {
   const [tab, setTab] = useState<TabKey>('activities')
   const [authState, setAuthState] = useState<AuthState>('checking')
-  const [username, setUsername] = useState<string>('admin')
+  const [displayName, setDisplayName] = useState<string>('Strava athlete')
 
   useEffect(() => {
     let cancelled = false
@@ -25,7 +24,8 @@ export default function App() {
         if (cancelled) return
         if (info.authenticated) {
           setAuthState('authenticated')
-          setUsername(info.username ?? 'admin')
+          const name = [info.firstname, info.lastname].filter(Boolean).join(' ').trim()
+          setDisplayName(name || info.username || `Athlete ${info.athlete_id ?? ''}`.trim())
         } else {
           setAuthState('unauthenticated')
         }
@@ -48,9 +48,9 @@ export default function App() {
     }
   }
 
-  function handleLoginSuccess(name: string) {
-    setUsername(name || 'admin')
-    setAuthState('authenticated')
+  async function handleStravaLogin() {
+    const { auth_url } = await getAuthInit()
+    window.location.href = auth_url
   }
 
   if (authState !== 'authenticated') {
@@ -59,7 +59,12 @@ export default function App() {
         {authState === 'checking' ? (
           <div style={{ fontSize: 16, color: '#555' }}>Loading…</div>
         ) : (
-          <LoginForm onSuccess={handleLoginSuccess} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
+            <h2 style={{ margin: 0 }}>Sign in with Strava</h2>
+            <button onClick={handleStravaLogin} style={{ padding: '10px 16px', fontSize: 14 }}>
+              Continue with Strava
+            </button>
+          </div>
         )}
       </div>
     )
@@ -70,7 +75,7 @@ export default function App() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
         <h1 style={{ marginTop: 0 }}>Strava Automator</h1>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <span style={{ fontSize: 13, color: '#666' }}>Signed in as <strong>{username}</strong></span>
+          <span style={{ fontSize: 13, color: '#666' }}>Signed in as <strong>{displayName}</strong></span>
           <button
             type="button"
             onClick={handleLogout}

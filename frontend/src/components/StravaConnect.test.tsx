@@ -1,64 +1,65 @@
-import { describe, it, expect } from 'vitest'
-import { renderHook } from '@testing-library/react'
-import { buildPollingChartData, usePollingChartData, formatSeconds, minuteToLabel } from './StravaConnect'
-import type { PollingProfile } from '../lib/api'
+import { render, screen } from '@testing-library/react'
+import { http, HttpResponse } from 'msw'
+import { setupServer } from 'msw/node'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { StravaConnect } from './StravaConnect'
 
-describe('usePollingChartData / buildPollingChartData', () => {
-  const baseProfile: PollingProfile = {
-    intervals: Array.from({ length: 1440 }, () => 300),
-    fallback: 300,
-    total_samples: 10,
-    computed_at: undefined,
-    valid_until: undefined,
-  }
+const API = 'http://localhost:8000'
 
-  it('returns null when no profile data', () => {
-    const { result } = renderHook(() => usePollingChartData(undefined, 0))
-    expect(result.current).toBeNull()
-  })
+const server = setupServer(
+  http.get(`${API}/api/auth/strava/status`, () => {
+    return HttpResponse.json({ connected: true, expires_at: 1710000000, scope: 'read' })
+  }),
+  http.get(`${API}/api/admin/ratelimit`, () => {
+    return HttpResponse.json({
+      now: 1710000000,
+      cooldown_until: 0,
+      cooldown_until_local: '',
+      cooldown_reason: '',
+      cooldown_scope: '',
+      cooldown_set_at: 0,
+      cooldown_message: '',
+      requests_15m: 2,
+      requests_24h: 20,
+      errors_429_15m: 0,
+      errors_429_24h: 0,
+      last_headers: null,
+      webhook: {
+        subscription_id: '123',
+        last_event_epoch: 1710000000,
+        last_event_local: '2024-03-09 10:00',
+        last_activity_id: 456,
+        last_event_aspect: 'create',
+        last_error: '',
+      },
+    })
+  }),
+  http.get(`${API}/api/admin/webhooks/status`, () => {
+    return HttpResponse.json({
+      subscription_id: '123',
+      callback_url: 'https://example.com/api/webhooks/strava',
+      verify_token_set: true,
+      last_event_epoch: 1710000000,
+      last_event_local: '2024-03-09 10:00',
+      last_activity_id: 456,
+      last_event_aspect: 'create',
+      last_error: '',
+    })
+  }),
+)
 
-  it('builds chart data and ensures now minute is present', () => {
-    const profile = { ...baseProfile }
-    profile.intervals[75] = 60
-    profile.intervals[600] = 120
+function renderWithClient(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>)
+}
 
-    const { result } = renderHook(() => usePollingChartData(profile, 600))
-    expect(result.current).not.toBeNull()
-    const chart = result.current!
-    expect(chart.data.length).toBeGreaterThan(0)
-    expect(chart.data.length).toBeLessThanOrEqual(289)
-    expect(chart.data.some((pt) => pt.minute === 600)).toBe(true)
-    expect(chart.xTickInterval).toBeGreaterThan(0)
-  })
+beforeAll(() => server.listen())
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
 
-  it('uses fallback when intervals are invalid', () => {
-    const profile: PollingProfile = {
-      intervals: Array.from({ length: 1440 }, (_, i) => (i % 2 === 0 ? ('bad' as unknown as number) : 90)),
-      fallback: 90,
-      total_samples: 5,
-      computed_at: undefined,
-      valid_until: undefined,
-    }
-    const chart = buildPollingChartData(profile, 120)
-    expect(chart).not.toBeNull()
-    expect(chart!.data.some((pt) => pt.minute === 120)).toBe(true)
-  })
-})
-
-describe('formatSeconds', () => {
-  it('formats seconds and minutes gracefully', () => {
-    expect(formatSeconds(45)).toBe('45s')
-    expect(formatSeconds(120)).toBe('2 min')
-    expect(formatSeconds(135)).toBe('2.3 min')
-    expect(formatSeconds(Number.NaN)).toBe('NaNs')
-  })
-})
-
-describe('minuteToLabel', () => {
-  it('wraps past 24h and pads zeros', () => {
-    expect(minuteToLabel(0)).toBe('00:00')
-    expect(minuteToLabel(61)).toBe('01:01')
-    expect(minuteToLabel(1500)).toBe('01:00')
-    expect(minuteToLabel(-5)).toBe('00:00')
-  })
+it('shows webhook status', async () => {
+  renderWithClient(<StravaConnect />)
+  expect(await screen.findByText(/Webhooks/i)).toBeTruthy()
+  expect(await screen.findByText(/Active/i)).toBeTruthy()
+  expect(screen.getByText(/Last event/i)).toBeTruthy()
 })
