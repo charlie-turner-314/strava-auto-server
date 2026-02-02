@@ -11,6 +11,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, status, Response, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -137,6 +138,68 @@ def _canonical_samesite(value: str) -> str:
     if value.lower() in {"lax", "strict", "none"}:
         return value.lower()
     return "lax"
+
+
+def _safe_text(resp: httpx.Response) -> str:
+    try:
+        return resp.text
+    except Exception:
+        return ""
+
+
+def _strava_error_detail(resp: httpx.Response) -> str:
+    try:
+        data = resp.json()
+    except Exception:
+        return _safe_text(resp)
+    if isinstance(data, dict):
+        message = str(data.get("message") or "")
+        errors = data.get("errors") or []
+        parts: List[str] = []
+        for err in errors if isinstance(errors, list) else [errors]:
+            if isinstance(err, dict):
+                fields = [str(err.get(k)) for k in ("resource", "field", "code") if err.get(k)]
+                msg = str(err.get("message") or "")
+                if fields:
+                    parts.append(":".join(fields))
+                if msg:
+                    parts.append(msg)
+            else:
+                parts.append(str(err))
+        tail = "; ".join([p for p in parts if p])
+        if message and tail:
+            return f"{message} ({tail})"
+        return message or tail or str(data)
+    return str(data)
+
+
+def _is_falsey(value: Any) -> bool:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"0", "false", "no", "off"}
+    return False
+
+
+def _normalize_url(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def _is_duplicate_subscription_error(detail: str) -> bool:
+    text = detail.lower()
+    return ("subscription" in text and "already" in text) or ("exists" in text)
+
+
+def _pick_matching_subscription(items: List[Dict[str, Any]], callback_url: str) -> Optional[Dict[str, Any]]:
+    if not items:
+        return None
+    desired = _normalize_url(callback_url)
+    for item in items:
+        if _normalize_url(str(item.get("callback_url") or "")) == desired:
+            return item
+    return items[0] if len(items) == 1 else None
 
 
 COOKIE_SAMESITE = _canonical_samesite(COOKIE_SAMESITE)
@@ -1001,6 +1064,8 @@ def strava_webhook_verify(
 ) -> Dict[str, str]:
     from .db import get_setting as _get_setting
 
+    if hub_mode.lower() not in {"subscribe", "unsubscribe"}:
+        raise HTTPException(status_code=400, detail="Invalid hub.mode")
     expected = STRAVA_WEBHOOK_VERIFY_TOKEN or _get_setting("strava_webhook_verify_token", "")
     if not expected:
         raise HTTPException(status_code=500, detail="Missing webhook verify token")
@@ -1010,9 +1075,14 @@ def strava_webhook_verify(
 
 
 @app.post("/api/webhooks/strava")
-async def strava_webhook_event(payload: StravaWebhookEvent) -> Dict[str, Any]:
-    event_id = f"{payload.subscription_id}:{payload.object_type}:{payload.object_id}:{payload.aspect_type}:{payload.event_time}"
-    payload_json = json.dumps(payload.model_dump(), separators=(",", ":"))
+async def strava_webhook_event(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        event = StravaWebhookEvent.model_validate(payload)
+    except ValidationError as e:
+        log.warning("Invalid Strava webhook payload: %s", e)
+        return {"status": "ignored", "error": "invalid_payload"}
+    event_id = f"{event.subscription_id}:{event.object_type}:{event.object_id}:{event.aspect_type}:{event.event_time}"
+    payload_json = json.dumps(event.model_dump(), separators=(",", ":"))
     received_at = datetime.now(timezone.utc).isoformat()
 
     inserted = 0
@@ -1032,12 +1102,12 @@ async def strava_webhook_event(payload: StravaWebhookEvent) -> Dict[str, Any]:
             ),
             {
                 "id": event_id,
-                "event_time": int(payload.event_time),
-                "object_type": payload.object_type,
-                "object_id": int(payload.object_id),
-                "aspect_type": payload.aspect_type,
-                "owner_id": int(payload.owner_id),
-                "subscription_id": int(payload.subscription_id),
+                "event_time": int(event.event_time),
+                "object_type": event.object_type,
+                "object_id": int(event.object_id),
+                "aspect_type": event.aspect_type,
+                "owner_id": int(event.owner_id),
+                "subscription_id": int(event.subscription_id),
                 "payload_json": payload_json,
                 "received_at": received_at,
                 "status": "received",
@@ -1047,19 +1117,19 @@ async def strava_webhook_event(payload: StravaWebhookEvent) -> Dict[str, Any]:
 
     # Store last event metadata for UI
     try:
-        aid = int(payload.owner_id)
+        aid = int(event.owner_id)
         set_setting(
-            f"strava_webhook_last_event_time:{aid}", str(int(payload.event_time))
+            f"strava_webhook_last_event_time:{aid}", str(int(event.event_time))
         )
         set_setting(
             f"strava_webhook_last_event_activity_id:{aid}",
-            str(int(payload.object_id)),
+            str(int(event.object_id)),
         )
         set_setting(
-            f"strava_webhook_last_event_aspect:{aid}", str(payload.aspect_type)
+            f"strava_webhook_last_event_aspect:{aid}", str(event.aspect_type)
         )
-        if payload.subscription_id:
-            set_setting("strava_webhook_subscription_id", str(int(payload.subscription_id)))
+        if event.subscription_id:
+            set_setting("strava_webhook_subscription_id", str(int(event.subscription_id)))
     except Exception:
         pass
 
@@ -1069,11 +1139,30 @@ async def strava_webhook_event(payload: StravaWebhookEvent) -> Dict[str, Any]:
     result: Dict[str, Any]
     error: Optional[str] = None
     status_str = "processed"
+    if event.object_type == "athlete":
+        updates = event.updates or {}
+        if _is_falsey(updates.get("authorized")):
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        sql_text(
+                            "DELETE FROM oauth_tokens WHERE provider='strava' AND athlete_id = :aid"
+                        ),
+                        {"aid": int(payload.owner_id)},
+                    )
+            except Exception:
+                pass
+            result = {"handled": True, "deauthorized": True}
+        else:
+            result = {"handled": False, "message": "Unsupported webhook object"}
+    else:
+        result = {}
     try:
-        result = await _scheduler.process_webhook_event(  # type: ignore[attr-defined]
-            engine,
-            payload.model_dump(),
-        )
+        if event.object_type != "athlete":
+            result = await _scheduler.process_webhook_event(  # type: ignore[attr-defined]
+                engine,
+                event.model_dump(),
+            )
     except Exception as e:  # noqa: BLE001
         error = str(e)
         status_str = "error"
@@ -1098,12 +1187,12 @@ async def strava_webhook_event(payload: StravaWebhookEvent) -> Dict[str, Any]:
         )
     if error:
         try:
-            set_setting(f"strava_webhook_last_error:{int(payload.owner_id)}", error)
+            set_setting(f"strava_webhook_last_error:{int(event.owner_id)}", error)
         except Exception:
             pass
     else:
         try:
-            set_setting(f"strava_webhook_last_error:{int(payload.owner_id)}", "")
+            set_setting(f"strava_webhook_last_error:{int(event.owner_id)}", "")
         except Exception:
             pass
     return {"status": status_str, "result": result}
@@ -1143,22 +1232,53 @@ def webhook_status(request: Request) -> Dict[str, Any]:
 
 @app.post("/api/admin/webhooks/subscribe")
 async def webhook_subscribe() -> Dict[str, Any]:
-    if not STRAVA_WEBHOOK_CALLBACK_URL:
-        raise HTTPException(status_code=400, detail="Missing STRAVA_WEBHOOK_CALLBACK_URL")
-    if not STRAVA_WEBHOOK_VERIFY_TOKEN:
-        raise HTTPException(status_code=400, detail="Missing STRAVA_WEBHOOK_VERIFY_TOKEN")
+    callback_url = STRAVA_WEBHOOK_CALLBACK_URL.strip()
+    verify_token = STRAVA_WEBHOOK_VERIFY_TOKEN.strip()
+    errors: List[str] = []
+    if not callback_url:
+        errors.append("Missing STRAVA_WEBHOOK_CALLBACK_URL")
+    else:
+        parsed = urlparse(callback_url)
+        if parsed.scheme != "https":
+            errors.append("STRAVA_WEBHOOK_CALLBACK_URL must use https")
+        if not parsed.netloc:
+            errors.append("STRAVA_WEBHOOK_CALLBACK_URL is invalid")
+    if not verify_token:
+        errors.append("Missing STRAVA_WEBHOOK_VERIFY_TOKEN")
+    elif not (1 <= len(verify_token) <= 30):
+        errors.append("STRAVA_WEBHOOK_VERIFY_TOKEN must be 1-30 characters")
+    if not STRAVA_CLIENT_ID or not STRAVA_CLIENT_ID.isdigit():
+        errors.append("STRAVA_CLIENT_ID must be set to your Strava app id")
+    if not STRAVA_CLIENT_SECRET:
+        errors.append("Missing STRAVA_CLIENT_SECRET")
+    if errors:
+        raise HTTPException(status_code=400, detail="; ".join(errors))
     client = StravaClient(engine)
     try:
-        data = await client.create_webhook_subscription(
-            STRAVA_WEBHOOK_CALLBACK_URL,
-            STRAVA_WEBHOOK_VERIFY_TOKEN,
-        )
+        data = await client.create_webhook_subscription(callback_url, verify_token)
+    except httpx.HTTPStatusError as e:
+        detail = _strava_error_detail(e.response) if e.response is not None else str(e)
+        if e.response is not None and e.response.status_code == 400 and _is_duplicate_subscription_error(detail):
+            try:
+                items = await client.list_webhook_subscriptions()
+                existing = _pick_matching_subscription(items, callback_url)
+                if existing:
+                    set_setting("strava_webhook_subscription_id", str(existing.get("id") or ""))
+                    set_setting("strava_webhook_callback_url", callback_url)
+                    set_setting("strava_webhook_verify_token", verify_token)
+                    return {"subscription": existing, "message": "Subscription already exists"}
+            except Exception:
+                pass
+        status = e.response.status_code if e.response is not None else 502
+        if status >= 500:
+            status = 502
+        raise HTTPException(status_code=status, detail=detail) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Failed to create subscription: {e}") from e
     try:
         set_setting("strava_webhook_subscription_id", str(data.get("id") or ""))
-        set_setting("strava_webhook_callback_url", STRAVA_WEBHOOK_CALLBACK_URL)
-        set_setting("strava_webhook_verify_token", STRAVA_WEBHOOK_VERIFY_TOKEN)
+        set_setting("strava_webhook_callback_url", callback_url)
+        set_setting("strava_webhook_verify_token", verify_token)
     except Exception:
         pass
     return {"subscription": data}
@@ -1174,6 +1294,12 @@ async def webhook_unsubscribe() -> Dict[str, Any]:
     client = StravaClient(engine)
     try:
         await client.delete_webhook_subscription(int(sub_id))
+    except httpx.HTTPStatusError as e:
+        detail = _strava_error_detail(e.response) if e.response is not None else str(e)
+        status = e.response.status_code if e.response is not None else 502
+        if status >= 500:
+            status = 502
+        raise HTTPException(status_code=status, detail=detail) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Failed to delete subscription: {e}") from e
     try:
@@ -1188,6 +1314,12 @@ async def webhook_list() -> Dict[str, Any]:
     client = StravaClient(engine)
     try:
         data = await client.list_webhook_subscriptions()
+    except httpx.HTTPStatusError as e:
+        detail = _strava_error_detail(e.response) if e.response is not None else str(e)
+        status = e.response.status_code if e.response is not None else 502
+        if status >= 500:
+            status = 502
+        raise HTTPException(status_code=status, detail=detail) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Failed to list subscriptions: {e}") from e
     return {"items": data}
