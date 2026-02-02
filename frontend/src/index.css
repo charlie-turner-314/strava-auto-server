@@ -1,25 +1,32 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  font-family: "Space Grotesk", "Trebuchet MS", "Lucida Sans Unicode", sans-serif;
+  --font-display: "Fraunces", "Georgia", "Times New Roman", serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: light dark;
 
   /* Theme variables (dark default) */
-  --bg: #121212;
-  --fg: #e6e6e6;
-  --surface: #1e1e1e;
-  --surface-2: #222;
-  --border: #333;
-  --muted: #a8a8a8;
-  --muted-weak: #8a8a8a;
-  --accent: #4ea1ff;
-  --accent-contrast: #0b5cab;
-  --tag-bg: rgba(78, 161, 255, 0.18);
-  --tag-border: #2f5170;
-  --tag-fg: #b7ddff;
-  --success-bg: #175e3b;
+  --bg: #0e1116;
+  --bg-alt: #0b0f15;
+  --fg: #eef1f6;
+  --surface: #141b25;
+  --surface-2: #1a2330;
+  --border: #2a3442;
+  --muted: #9aa5b4;
+  --muted-weak: #7b8493;
+  --accent: #ff6b2c;
+  --accent-2: #31c4a7;
+  --accent-contrast: #0f0c0a;
+  --tag-bg: rgba(255, 107, 44, 0.18);
+  --tag-border: rgba(255, 107, 44, 0.45);
+  --tag-fg: #ffd5c2;
+  --success-bg: #0f3d2a;
   --success-fg: #d1fbe3;
+  --glow-1: rgba(255, 107, 44, 0.22);
+  --glow-2: rgba(49, 196, 167, 0.18);
 
   color: var(--fg);
   background-color: var(--bg);
@@ -30,55 +37,106 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-a { font-weight: 500; color: var(--accent); text-decoration: inherit; }
-a:hover { color: #80b8ff; }
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+a { font-weight: 600; color: var(--accent); text-decoration: none; }
+a:hover { color: #ff8a5a; }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
   min-width: 320px;
   min-height: 100vh;
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(900px 500px at 0% -10%, var(--glow-1), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, var(--glow-2), transparent 60%),
+    linear-gradient(180deg, var(--bg), var(--bg-alt));
+  color: var(--fg);
 }
 
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 button {
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--border);
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
+  padding: 0.6em 1.1em;
+  font-size: 0.95rem;
+  font-weight: 600;
   font-family: inherit;
   background-color: var(--surface);
+  color: var(--fg);
   cursor: pointer;
-  transition: border-color 0.25s;
+  transition: border-color 0.25s, box-shadow 0.25s, transform 0.2s;
 }
 button:hover { border-color: var(--accent); }
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 button:focus,
 button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--fg);
+  padding: 0.5rem 0.7rem;
+  font-family: inherit;
+}
+
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 0.1rem 0.3rem;
+  border-radius: 6px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+@media (max-width: 900px) {
+  table {
+    display: block;
+    overflow-x: auto;
+  }
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #ffffff;
-    --fg: #213547;
+    --bg: #f7f2ec;
+    --bg-alt: #efe6dd;
+    --fg: #2a221c;
     --surface: #ffffff;
-    --surface-2: #fafafa;
-    --border: #ddd;
-    --muted: #666;
-    --muted-weak: #999;
-    --accent: #246bff;
-    --accent-contrast: #0b5cab;
-    --tag-bg: #eef6ff;
-    --tag-border: #cfe8ff;
-    --tag-fg: #0b5cab;
-    --success-bg: #dff5e6;
+    --surface-2: #f9f3ee;
+    --border: #e3d7cb;
+    --muted: #6f5f52;
+    --muted-weak: #8b7a6f;
+    --accent: #e5531d;
+    --accent-2: #1b9e83;
+    --accent-contrast: #1a120d;
+    --tag-bg: #ffe7dc;
+    --tag-border: #ffd1bb;
+    --tag-fg: #8b2b0f;
+    --success-bg: #dff6e8;
     --success-fg: #0a7f2e;
+    --glow-1: rgba(245, 151, 110, 0.35);
+    --glow-2: rgba(66, 191, 160, 0.25);
     color: var(--fg);
     background-color: var(--bg);
   }

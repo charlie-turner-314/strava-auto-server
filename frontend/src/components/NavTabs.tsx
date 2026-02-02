@@ -10,21 +10,16 @@ export function NavTabs({
   onChange: (key: TabKey) => void
 }) {
   return (
-    <div style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border)', marginBottom: 12 }}>
+    <div className="nav-tabs">
       {tabs.map((t) => {
         const isActive = t.key === active
         return (
           <button
             key={t.key}
+            type="button"
             onClick={() => onChange(t.key)}
-            style={{
-              padding: '8px 12px',
-              border: 'none',
-              borderBottom: isActive ? '2px solid var(--fg)' : '2px solid transparent',
-              background: 'transparent',
-              cursor: 'pointer',
-              fontWeight: isActive ? 600 : 400,
-            }}
+            className={`nav-tab${isActive ? ' active' : ''}`}
+            aria-current={isActive ? 'page' : undefined}
           >
             {t.label}
           </button>

@@ -55,57 +55,75 @@ export default function App() {
 
   if (authState !== 'authenticated') {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f3f4f6' }}>
-        {authState === 'checking' ? (
-          <div style={{ fontSize: 16, color: '#555' }}>Loading…</div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center' }}>
-            <h2 style={{ margin: 0 }}>Sign in with Strava</h2>
-            <button onClick={handleStravaLogin} style={{ padding: '10px 16px', fontSize: 14 }}>
-              Continue with Strava
-            </button>
+      <div className="landing-shell">
+        <div className="landing-card">
+          <div className="landing-badge">Strava Automator</div>
+          <h1 className="landing-title">Make your activities self-cleaning.</h1>
+          <p className="landing-subtitle">
+            Craft rules once. Keep titles tidy, flag commutes, and sync gear
+            without touching every workout.
+          </p>
+          <div className="landing-tags">
+            <span className="landing-tag">Clean titles</span>
+            <span className="landing-tag">Commute flags</span>
+            <span className="landing-tag">Gear auto-assign</span>
           </div>
-        )}
+          {authState === 'checking' ? (
+            <div className="landing-status">Checking session…</div>
+          ) : (
+            <div className="landing-cta">
+              <button type="button" className="btn-primary" onClick={handleStravaLogin}>
+                Continue with Strava
+              </button>
+              <span className="landing-note">Secure OAuth. Your tokens stay private.</span>
+            </div>
+          )}
+        </div>
       </div>
     )
   }
 
   return (
-    <div style={{ maxWidth: 1100, margin: '0 auto', padding: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
-        <h1 style={{ marginTop: 0 }}>Strava Automator</h1>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-          <span style={{ fontSize: 13, color: '#666' }}>Signed in as <strong>{displayName}</strong></span>
-          <button
-            type="button"
-            onClick={handleLogout}
-            style={{ padding: '6px 10px', fontSize: 13, cursor: 'pointer' }}
-          >
-            Log out
-          </button>
+    <div className="app-shell">
+      <div className="app-container">
+        <div className="app-header">
+          <div>
+            <h1 className="app-title">Strava Automator</h1>
+            <div className="app-subtitle">Rule-driven cleanup for every ride, run, and hike.</div>
+          </div>
+          <div className="app-user">
+            <span>Signed in as <strong>{displayName}</strong></span>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="btn-ghost"
+            >
+              Log out
+            </button>
+          </div>
         </div>
+        <StravaConnect />
+        <NavTabs
+          tabs={[
+            { key: 'activities', label: 'Activities' },
+            { key: 'shoes', label: 'Shoes' },
+            { key: 'automations', label: 'Automations' },
+            { key: 'apply', label: 'Apply Automations' },
+            { key: 'counters', label: 'Counters' },
+          ]}
+          active={tab}
+          onChange={(k) => setTab(k as TabKey)}
+        />
+        {tab === 'activities'
+          ? <Activities />
+          : tab === 'shoes'
+          ? <ShoeStats />
+          : tab === 'automations'
+          ? <Automations />
+          : tab === 'apply'
+          ? <ApplyAutomations />
+          : <Counters />}
       </div>
-      <StravaConnect />
-      <NavTabs
-        tabs={[
-          { key: 'activities', label: 'Activities' },
-          { key: 'shoes', label: 'Shoes' },
-          { key: 'automations', label: 'Automations' },
-          { key: 'apply', label: 'Apply Automations' },
-          { key: 'counters', label: 'Counters' },
-        ]}
-        active={tab}
-        onChange={(k) => setTab(k as TabKey)}
-      />
-      {tab === 'activities'
-        ? <Activities />
-        : tab === 'shoes'
-        ? <ShoeStats />
-        : tab === 'automations'
-        ? <Automations />
-        : tab === 'apply'
-        ? <ApplyAutomations />
-        : <Counters />}
     </div>
   )
 }
