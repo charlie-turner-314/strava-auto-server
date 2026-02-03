@@ -531,6 +531,46 @@ def _counter_key(key: str, athlete_id: Optional[int] = None) -> str:
     return f"counter:{int(athlete_id)}:{key}"
 
 
+def _migrate_legacy_counters(athlete_id: int) -> int:
+    """Move legacy counter:* keys to counter:{athlete_id}:* keys.
+
+    Legacy keys are those with a single colon (e.g., counter:commute).
+    """
+    athlete_prefix = f"counter:{int(athlete_id)}:"
+    eng = get_engine()
+    migrated = 0
+    with eng.begin() as conn:
+        rows = conn.execute(
+            sql_text("SELECT key, value FROM settings WHERE key LIKE 'counter:%'")
+        ).fetchall()
+        for r in rows:
+            key = str(r.key)
+            if key.startswith(athlete_prefix):
+                continue
+            if not key.startswith("counter:"):
+                continue
+            suffix = key[len("counter:") :]
+            if not suffix or ":" in suffix:
+                continue
+            new_key = f"{athlete_prefix}{suffix}"
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO settings(key, value)
+                    VALUES (:k, :v)
+                    ON CONFLICT(key) DO NOTHING
+                    """
+                ),
+                {"k": new_key, "v": str(r.value)},
+            )
+            conn.execute(
+                sql_text("DELETE FROM settings WHERE key = :k"),
+                {"k": key},
+            )
+            migrated += 1
+    return migrated
+
+
 def get_counter(key: str, athlete_id: Optional[int] = None) -> int:
     """Return current integer counter value for key (default 0)."""
     eng = get_engine()
@@ -598,6 +638,11 @@ def list_counters(athlete_id: Optional[int] = None) -> List[Tuple[str, int]]:
 
     Keys are returned without the "counter:" prefix for display/API convenience.
     """
+    if athlete_id is not None:
+        try:
+            _migrate_legacy_counters(int(athlete_id))
+        except Exception:
+            pass
     prefix = _counter_key("", athlete_id).rstrip(":")
     eng = get_engine()
     items: List[Tuple[str, int]] = []

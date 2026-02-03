@@ -85,7 +85,12 @@ class StravaClient:
 
         return f"https://www.strava.com/oauth/authorize?{urlencode(params)}"
 
-    async def _save_token(self, data: Dict[str, Any]) -> TokenInfo:
+    async def _save_token(
+        self,
+        data: Dict[str, Any],
+        *,
+        athlete_id_hint: Optional[int] = None,
+    ) -> TokenInfo:
         # Be tolerant of different token payload shapes (expires_at/expires_in)
         exp_raw = data.get("expires_at")
         exp_val: int
@@ -100,6 +105,8 @@ class StravaClient:
                 exp_val = 0
 
         athlete_id = (data.get("athlete") or {}).get("id")
+        if athlete_id is None:
+            athlete_id = athlete_id_hint or self.athlete_id
         token = TokenInfo(
             access_token=str(data.get("access_token", "")),
             refresh_token=str(data.get("refresh_token", "")),
@@ -109,6 +116,8 @@ class StravaClient:
         )
         if token.athlete_id is not None:
             self.athlete_id = int(token.athlete_id)
+        else:
+            raise RuntimeError("Missing athlete_id while saving Strava token")
         from datetime import datetime, timezone
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -223,7 +232,7 @@ class StravaClient:
             )
             resp.raise_for_status()
         data = resp.json()
-        new_token = await self._save_token(data)
+        new_token = await self._save_token(data, athlete_id_hint=token.athlete_id)
         ttl = new_token.expires_at - _now_epoch()
         log.info("Strava token refreshed, ttl=%ss", ttl)
 
