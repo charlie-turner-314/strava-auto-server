@@ -26,7 +26,7 @@ function JsonTextarea({ value, onChange, rows = 4 }: { value: string; onChange: 
       value={value}
       onChange={(e) => onChange(e.target.value)}
       rows={rows}
-      style={{ width: '100%', fontFamily: 'monospace', fontSize: 13, background: 'var(--surface)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 6, padding: 8 }}
+      className="input-mono"
       placeholder="[]"
     />
   )
@@ -116,12 +116,16 @@ export function Automations() {
   ])
 
   return (
-    <div>
-      <h3 style={{ marginTop: 24 }}>Automations</h3>
+    <div className="stack-lg">
+      <section className="panel">
+        <div className="panel-header">
+          <h3 className="panel-title">Automations</h3>
+          <span className="panel-subtitle">Define rules that auto-apply on every activity.</span>
+        </div>
       {list.isLoading && <div>Loading…</div>}
       {list.isError && <div>Failed to load automations</div>}
       {!list.isLoading && !list.isError && (
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: 16 }}>
+        <table className="table">
           <thead>
             <tr>
               <th align="left">Name</th>
@@ -133,39 +137,45 @@ export function Automations() {
           <tbody>
             {list.data!.map((a) => (
               <tr key={a.id}>
-                <td style={{ borderTop: '1px solid #eee' }}>{a.name}</td>
-                <td style={{ borderTop: '1px solid #eee' }}>
+                <td>{a.name}</td>
+                <td>
                   <EnabledToggle enabled={a.enabled} onChange={async (next) => {
                     await setAutomationEnabled(a.id, next)
                     qc.invalidateQueries({ queryKey: ['automations'] })
                   }} />
                 </td>
-                <td style={{ borderTop: '1px solid #eee', textAlign: 'right' }}>{a.priority}</td>
-                <td style={{ borderTop: '1px solid #eee', textAlign: 'right' }}>
-                  <button onClick={() => startEdit(a)} style={{ marginRight: 8 }}>Edit</button>
-                  <button onClick={() => delMut.mutate(a.id)} disabled={delMut.isPending}>Delete</button>
+                <td style={{ textAlign: 'right' }}>{a.priority}</td>
+                <td style={{ textAlign: 'right' }}>
+                  <div className="panel-actions" style={{ justifyContent: 'flex-end' }}>
+                    <button onClick={() => startEdit(a)}>Edit</button>
+                    <button onClick={() => delMut.mutate(a.id)} disabled={delMut.isPending}>Delete</button>
+                  </div>
                 </td>
               </tr>
             ))}
             {list.data!.length === 0 && (
               <tr>
-                <td colSpan={4} style={{ color: 'var(--muted)', paddingTop: 8 }}>No automations yet</td>
+                <td colSpan={4} className="muted">No automations yet</td>
               </tr>
             )}
           </tbody>
         </table>
       )}
+      </section>
 
-      <div style={{ border: '1px solid #ddd', borderRadius: 8, padding: 12 }}>
-        <h4 style={{ marginTop: 0 }}>{editingId ? 'Edit Automation' : 'New Automation'}</h4>
-        {error && <div style={{ color: 'crimson', marginBottom: 8 }}>{error}</div>}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 200px 200px', gap: 8, alignItems: 'center' }}>
+      <section className="panel">
+        <div className="panel-header">
+          <h4 className="panel-title">{editingId ? 'Edit Automation' : 'New Automation'}</h4>
+          <span className="panel-subtitle">Create the logic that runs on new activities.</span>
+        </div>
+        {error && <div style={{ color: 'var(--danger)', marginBottom: 8 }}>{error}</div>}
+        <div className="form-grid">
           <input placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
-          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <label className="field">
             <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enabled
           </label>
-          <label style={{ display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'flex-end' }}>
-            <span style={{ whiteSpace: 'nowrap', fontSize: 12, color: 'inherit' }}>Priority (higher runs first)</span>
+          <label className="field" style={{ justifyContent: 'flex-end' }}>
+            <span style={{ whiteSpace: 'nowrap' }}>Priority (higher runs first)</span>
             <input
               type="number"
               value={priority}
@@ -176,36 +186,36 @@ export function Automations() {
           </label>
         </div>
         <div style={{ marginTop: 12 }}>
-          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <label className="field">
             <input type="checkbox" checked={useBuilder} onChange={(e) => setUseBuilder(e.target.checked)} /> Use builder (recommended)
           </label>
         </div>
 
         {useBuilder ? (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+          <div className="panel-grid" style={{ marginTop: 12 }}>
             <BuilderConditions value={builtConds} onChange={setBuiltConds} />
             <BuilderEffects value={builtEffs} onChange={setBuiltEffs} />
           </div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+          <div className="panel-grid" style={{ marginTop: 12 }}>
             <div>
-              <div style={{ fontSize: 12, color: 'var(--muted)' }}>Conditions (JSON array)</div>
+              <div className="panel-subtitle">Conditions (JSON array)</div>
               <JsonTextarea value={conditions} onChange={setConditions} rows={6} />
             </div>
             <div>
-              <div style={{ fontSize: 12, color: 'var(--muted)' }}>Effects (JSON array)</div>
+              <div className="panel-subtitle">Effects (JSON array)</div>
               <JsonTextarea value={effects} onChange={setEffects} rows={6} />
             </div>
           </div>
         )}
-        <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+        <div className="panel-actions" style={{ marginTop: 12 }}>
           <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>{editingId ? 'Save' : 'Create'}</button>
           {editingId && (
             <button onClick={cancelEdit} type="button">Cancel</button>
           )}
         </div>
         <PreviewPanel conditions={useBuilder ? builtConds : safeParseArray<CondType>(conditions)} effects={useBuilder ? builtEffs : safeParseArray<EffType>(effects)} />
-      </div>
+      </section>
     </div>
   )
 }
@@ -246,7 +256,7 @@ function DayMultiSelect({ value, onChange }: { value: string[]; onChange: (v: st
 function ShoesSelect({ onSelect }: { onSelect: (gear_id: string) => void }) {
   const q = useQuery({ queryKey: ['athlete-gear'], queryFn: getAthleteGear })
   if (q.isLoading) return <span>Loading shoes…</span>
-  if (q.isError) return <span style={{ color: 'crimson' }}>Failed to load shoes</span>
+  if (q.isError) return <span style={{ color: 'var(--danger)' }}>Failed to load shoes</span>
   const shoes: GearItem[] = q.data?.shoes ?? []
   return (
     <select onChange={(e) => onSelect(e.target.value)} defaultValue="">
@@ -418,8 +428,8 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
       </div>
       {value.length > 0 && (
         <div style={{ marginTop: 8, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead style={{ background: 'var(--surface-strong, #f5f5f5)' }}>
+          <table className="table" style={{ fontSize: 13 }}>
+            <thead>
               <tr>
                 <th style={{ textAlign: 'left', padding: '6px 8px' }}>Condition</th>
                 <th style={{ textAlign: 'left', padding: '6px 8px' }}>Operator</th>
@@ -429,7 +439,7 @@ function BuilderConditions({ value, onChange }: { value: CondType[]; onChange: (
             </thead>
             <tbody>
               {value.map((c, i) => (
-                <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                <tr key={i}>
                   <td style={{ padding: '6px 8px' }}>{describeConditionType(c)}</td>
                   <td style={{ padding: '6px 8px' }}>{c.op || '—'}</td>
                   <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{formatConditionValue(c)}</td>
@@ -508,8 +518,8 @@ function BuilderEffects({ value, onChange }: { value: EffType[]; onChange: (v: E
       </div>
       {value.length > 0 && (
         <div style={{ marginTop: 8, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead style={{ background: 'var(--surface-strong, #f5f5f5)' }}>
+          <table className="table" style={{ fontSize: 13 }}>
+            <thead>
               <tr>
                 <th style={{ textAlign: 'left', padding: '6px 8px' }}>Effect</th>
                 <th style={{ textAlign: 'left', padding: '6px 8px' }}>Details</th>
@@ -518,7 +528,7 @@ function BuilderEffects({ value, onChange }: { value: EffType[]; onChange: (v: E
             </thead>
             <tbody>
               {value.map((e, i) => (
-                <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                <tr key={i}>
                   <td style={{ padding: '6px 8px' }}>{describeEffectType(e)}</td>
                   <td style={{ padding: '6px 8px', fontFamily: 'monospace' }}>{formatEffectValue(e)}</td>
                   <td style={{ padding: '6px 8px', textAlign: 'right' }}>

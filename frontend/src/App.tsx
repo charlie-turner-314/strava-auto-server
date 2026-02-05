@@ -102,27 +102,29 @@ export default function App() {
             </button>
           </div>
         </div>
-        <StravaConnect />
-        <NavTabs
-          tabs={[
-            { key: 'activities', label: 'Activities' },
-            { key: 'shoes', label: 'Shoes' },
-            { key: 'automations', label: 'Automations' },
-            { key: 'apply', label: 'Apply Automations' },
-            { key: 'counters', label: 'Counters' },
-          ]}
-          active={tab}
-          onChange={(k) => setTab(k as TabKey)}
-        />
-        {tab === 'activities'
-          ? <Activities />
-          : tab === 'shoes'
-          ? <ShoeStats />
-          : tab === 'automations'
-          ? <Automations />
-          : tab === 'apply'
-          ? <ApplyAutomations />
-          : <Counters />}
+        <div className="stack-lg">
+          <StravaConnect />
+          <NavTabs
+            tabs={[
+              { key: 'activities', label: 'Activities' },
+              { key: 'shoes', label: 'Shoes' },
+              { key: 'automations', label: 'Automations' },
+              { key: 'apply', label: 'Apply Automations' },
+              { key: 'counters', label: 'Counters' },
+            ]}
+            active={tab}
+            onChange={(k) => setTab(k as TabKey)}
+          />
+          {tab === 'activities'
+            ? <Activities />
+            : tab === 'shoes'
+            ? <ShoeStats />
+            : tab === 'automations'
+            ? <Automations />
+            : tab === 'apply'
+            ? <ApplyAutomations />
+            : <Counters />}
+        </div>
       </div>
     </div>
   )

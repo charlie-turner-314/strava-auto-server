@@ -112,20 +112,23 @@ export function ShoeStats() {
   }
 
   return (
-    <div>
-      <h3 style={{ marginTop: 0 }}>Shoes</h3>
+    <section className="panel">
+      <div className="panel-header">
+        <h3 className="panel-title">Shoes</h3>
+        <span className="panel-subtitle">Gear usage snapshot from Strava.</span>
+      </div>
       {query.isLoading && <div>Loading shoes…</div>}
-      {query.isError && <div style={{ color: 'crimson' }}>Failed to load shoes</div>}
+      {query.isError && <div style={{ color: 'var(--danger)' }}>Failed to load shoes</div>}
       {!query.isLoading && !query.isError && (
         <>
-          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <table className="table" style={{ tableLayout: 'fixed' }}>
             <thead>
               <tr>
                 <th align="left" style={{ width: '26%' }}>
                   <button
                     type="button"
                     onClick={() => toggleSort('name')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'name' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Shoe', sort.key === 'name', sort.direction)}
                   </button>
@@ -134,7 +137,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('activity_count')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'activity_count' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Activities', sort.key === 'activity_count', sort.direction)}
                   </button>
@@ -143,7 +146,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('total_distance')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'total_distance' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Total Distance', sort.key === 'total_distance', sort.direction)}
                   </button>
@@ -152,7 +155,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('total_moving_time')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'total_moving_time' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Moving Time', sort.key === 'total_moving_time', sort.direction)}
                   </button>
@@ -161,7 +164,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('avg_pace')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'avg_pace' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Avg Pace', sort.key === 'avg_pace', sort.direction)}
                   </button>
@@ -170,7 +173,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('avg_cadence')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'avg_cadence' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Avg Cadence', sort.key === 'avg_cadence', sort.direction)}
                   </button>
@@ -179,7 +182,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('lifetime_distance')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'lifetime_distance' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Lifetime Dist', sort.key === 'lifetime_distance', sort.direction)}
                   </button>
@@ -188,7 +191,7 @@ export function ShoeStats() {
                   <button
                     type="button"
                     onClick={() => toggleSort('last_activity_at')}
-                    style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontWeight: sort.key === 'last_activity_at' ? 600 : 400 }}
+                    className="table-sort"
                   >
                     {renderSortLabel('Last Activity', sort.key === 'last_activity_at', sort.direction)}
                   </button>
@@ -198,7 +201,7 @@ export function ShoeStats() {
             <tbody>
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={8} style={{ borderTop: '1px solid var(--border)', color: 'var(--muted)' }}>No shoes yet</td>
+                  <td colSpan={8} className="muted">No shoes yet</td>
                 </tr>
               ) : (
                 items.map((shoe) => {
@@ -210,20 +213,20 @@ export function ShoeStats() {
                   const last = formatDateTime(shoe.last_activity_at)
                   return (
                     <tr key={shoe.gear_id}>
-                      <td style={{ borderTop: '1px solid var(--border)' }}>
+                      <td>
                         <div style={{ fontWeight: 600 }}>{shoe.name || '(unnamed)'}</div>
-                        <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                        <div className="panel-subtitle">
                           <code>{shoe.gear_id}</code>
                           {shoe.is_primary && <span style={{ marginLeft: 6, fontWeight: 500 }}>(primary)</span>}
                         </div>
                       </td>
-                      <td style={{ borderTop: '1px solid var(--border)', textAlign: 'right' }}>{shoe.activity_count}</td>
-                      <td style={{ borderTop: '1px solid var(--border)', textAlign: 'right' }}>{totalDist || '0.00km'}</td>
-                      <td style={{ borderTop: '1px solid var(--border)', textAlign: 'right' }}>{moving || '00m00s'}</td>
-                      <td style={{ borderTop: '1px solid var(--border)', textAlign: 'right' }}>{pace || '--'}</td>
-                      <td style={{ borderTop: '1px solid var(--border)', textAlign: 'right' }}>{cadence || '--'}</td>
-                      <td style={{ borderTop: '1px solid var(--border)', textAlign: 'right' }}>{lifetime || '--'}</td>
-                      <td style={{ borderTop: '1px solid var(--border)' }}>{last || ''}</td>
+                      <td style={{ textAlign: 'right' }}>{shoe.activity_count}</td>
+                      <td style={{ textAlign: 'right' }}>{totalDist || '0.00km'}</td>
+                      <td style={{ textAlign: 'right' }}>{moving || '00m00s'}</td>
+                      <td style={{ textAlign: 'right' }}>{pace || '--'}</td>
+                      <td style={{ textAlign: 'right' }}>{cadence || '--'}</td>
+                      <td style={{ textAlign: 'right' }}>{lifetime || '--'}</td>
+                      <td>{last || ''}</td>
                     </tr>
                   )
                 })
@@ -232,7 +235,7 @@ export function ShoeStats() {
           </table>
         </>
       )}
-    </div>
+    </section>
   )
 }
 

@@ -40,45 +40,52 @@ export function Counters() {
   })
 
   return (
-    <div>
-      <h3 style={{ marginTop: 0 }}>Counters</h3>
+    <section className="panel">
+      <div className="panel-header">
+        <h3 className="panel-title">Counters</h3>
+        <span className="panel-subtitle">Auto-increment values for templates</span>
+      </div>
       {list.isLoading && <div>Loading…</div>}
       {list.isError && <div>Failed to load counters</div>}
       {!list.isLoading && !list.isError && (
         <>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-            <button onClick={() => resetAll.mutate()} disabled={resetAll.isPending}>Reset All</button>
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Limit</span>
+          <div className="toolbar">
+            <div className="toolbar-group">
+              <button onClick={() => resetAll.mutate()} disabled={resetAll.isPending}>Reset All</button>
+            </div>
+            <div className="toolbar-group">
+              <label className="field">
+                <span>Limit</span>
                 <input value={limit} onChange={(e) => setLimit(e.target.value)} placeholder='e.g. 200' style={{ width: 100 }} />
               </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <label className="field">
                 <input type='checkbox' checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
-                <span style={{ fontSize: 12, color: 'var(--muted)' }}>Dry run</span>
+                <span>Dry run</span>
               </label>
               <button onClick={() => reapply.mutate()} disabled={reapply.isPending} title='Reapply counter-based automations to all activities'>
                 {reapply.isPending ? (dryRun ? 'Simulating…' : 'Reapplying…') : (dryRun ? 'Simulate Reapply' : 'Reapply Now')}
               </button>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 12, color: 'var(--muted)' }}>From date</span>
-              <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
-            </label>
-            <button
-              onClick={() => reapplyAutos.mutate()}
-              disabled={reapplyAutos.isPending || !since}
-              title='Reapply all automations from a given date'
-            >
-              {reapplyAutos.isPending ? (dryRun ? 'Simulating…' : 'Reapplying…') : (dryRun ? 'Simulate Reapply (Date)' : 'Reapply From Date')}
-            </button>
+          <div className="toolbar">
+            <div className="toolbar-group">
+              <label className="field">
+                <span>From date</span>
+                <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
+              </label>
+              <button
+                onClick={() => reapplyAutos.mutate()}
+                disabled={reapplyAutos.isPending || !since}
+                title='Reapply all automations from a given date'
+              >
+                {reapplyAutos.isPending ? (dryRun ? 'Simulating…' : 'Reapplying…') : (dryRun ? 'Simulate Reapply (Date)' : 'Reapply From Date')}
+              </button>
+            </div>
           </div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+          <div className="notice">
             Stored value is the last value used; next automation run will use last + 1.
           </div>
-          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+          <table className="table" style={{ tableLayout: 'fixed' }}>
             <thead>
               <tr>
                 <th align="left" style={{ width: '30%' }}>Key</th>
@@ -89,7 +96,7 @@ export function Counters() {
             </thead>
             <tbody>
               {(list.data?.items || []).length === 0 ? (
-                <tr><td colSpan={4} style={{ color: 'var(--muted)', borderTop: '1px solid var(--border)' }}>No counters yet</td></tr>
+                <tr><td colSpan={4} className="muted">No counters yet</td></tr>
               ) : (
                 list.data!.items.map((it) => {
                   const rawValue = edits[it.key] ?? String(it.value)
@@ -97,11 +104,11 @@ export function Counters() {
                   const canSet = rawValue.trim() !== '' && Number.isFinite(parsedValue) && Number.isInteger(parsedValue) && parsedValue >= 0
                   return (
                   <tr key={it.key}>
-                    <td style={{ borderTop: '1px solid var(--border)' }}><code>{it.key}</code></td>
-                    <td style={{ borderTop: '1px solid var(--border)' }}>{it.value}</td>
-                    <td style={{ borderTop: '1px solid var(--border)' }}>{it.value + 1}</td>
-                    <td style={{ borderTop: '1px solid var(--border)' }}>
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <td><code>{it.key}</code></td>
+                    <td>{it.value}</td>
+                    <td>{it.value + 1}</td>
+                    <td>
+                      <div className="panel-actions">
                         <input
                           type="number"
                           min="0"
@@ -130,18 +137,18 @@ export function Counters() {
             </tbody>
           </table>
           {reapply.data && (
-            <div style={{ marginTop: 8, color: 'var(--muted)' }}>
+            <div className="notice" style={{ marginTop: 8 }}>
               Result: updated {reapply.data.updated}, skipped {reapply.data.skipped}
             </div>
           )}
           {reapplyAutos.data && (
-            <div style={{ marginTop: 4, color: 'var(--muted)' }}>
+            <div className="notice" style={{ marginTop: 4 }}>
               Date result: updated {reapplyAutos.data.updated}, skipped {reapplyAutos.data.skipped}
             </div>
           )}
         </>
       )}
-    </div>
+    </section>
   )
 }
 

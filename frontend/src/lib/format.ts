@@ -30,29 +30,35 @@ export function formatPace(secondsPerKm: number | null | undefined): string {
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "";
-  const s = String(iso);
-  // Prefer rendering the literal local time encoded in the string without timezone conversion.
-  // Extract YYYY-MM-DDTHH:MM (ignore any timezone suffix like Z or +hh:mm)
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
   const months = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
   ];
-  if (m) {
-    const [, y, mo, d, h, mi] = m;
-    const year = y;
-    const mon = months[Math.max(0, Math.min(11, parseInt(mo, 10) - 1))];
-    let hours = parseInt(h, 10);
-    const minutes = mi;
-    const ampm = hours >= 12 ? "pm" : "am";
-    hours = hours % 12; if (hours === 0) hours = 12;
-    const hh = String(hours).padStart(2, "0");
-    const day = d;
-    return `${day} ${mon}, ${year} ${hh}:${minutes} ${ampm}`;
+  const s = String(iso).trim();
+  const hasTz = /[zZ]|[+-]\d{2}:\d{2}$/.test(s);
+  let d: Date | null = null;
+  if (hasTz) {
+    const parsed = new Date(s);
+    d = Number.isNaN(parsed.getTime()) ? null : parsed;
+  } else {
+    const m = s.match(
+      /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/
+    );
+    if (m) {
+      const year = parseInt(m[1], 10);
+      const month = parseInt(m[2], 10) - 1;
+      const day = parseInt(m[3], 10);
+      const hour = parseInt(m[4] ?? "0", 10);
+      const minute = parseInt(m[5] ?? "0", 10);
+      const second = parseInt(m[6] ?? "0", 10);
+      d = new Date(year, month, day, hour, minute, second);
+    }
   }
-  // Fallback to Date parsing if the string is non-standard
-  const d = new Date(s);
-  if (isNaN(d.getTime())) return "";
+  if (!d) {
+    const parsed = new Date(s);
+    d = Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  if (!d) return "";
   const day = String(d.getDate()).padStart(2, "0");
   const mon = months[d.getMonth()];
   const year = d.getFullYear();

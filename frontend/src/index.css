@@ -14,6 +14,7 @@
   --fg: #eef1f6;
   --surface: #141b25;
   --surface-2: #1a2330;
+  --surface-strong: #202a38;
   --border: #2a3442;
   --muted: #9aa5b4;
   --muted-weak: #7b8493;
@@ -25,6 +26,13 @@
   --tag-fg: #ffd5c2;
   --success-bg: #0f3d2a;
   --success-fg: #d1fbe3;
+  --danger: #ff6b6b;
+  --radius-lg: 22px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+  --shadow-soft: 0 18px 40px rgba(0, 0, 0, 0.28);
+  --shadow-lift: 0 24px 60px rgba(0, 0, 0, 0.32);
+  --row-hover: rgba(255, 255, 255, 0.04);
   --glow-1: rgba(255, 107, 44, 0.22);
   --glow-2: rgba(49, 196, 167, 0.18);
 
@@ -108,6 +116,26 @@ code {
 table {
   width: 100%;
   border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+th,
+td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+th {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.68rem;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+tbody tr:hover {
+  background: var(--row-hover);
 }
 
 @media (max-width: 900px) {
@@ -119,24 +147,27 @@ table {
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f7f2ec;
-    --bg-alt: #efe6dd;
-    --fg: #2a221c;
-    --surface: #ffffff;
-    --surface-2: #f9f3ee;
-    --border: #e3d7cb;
-    --muted: #6f5f52;
-    --muted-weak: #8b7a6f;
-    --accent: #e5531d;
-    --accent-2: #1b9e83;
+  --bg: #f7f2ec;
+  --bg-alt: #efe6dd;
+  --fg: #2a221c;
+  --surface: #ffffff;
+  --surface-2: #f9f3ee;
+  --surface-strong: #efe3d7;
+  --border: #e3d7cb;
+  --muted: #6f5f52;
+  --muted-weak: #8b7a6f;
+  --accent: #e5531d;
+  --accent-2: #1b9e83;
     --accent-contrast: #1a120d;
     --tag-bg: #ffe7dc;
-    --tag-border: #ffd1bb;
-    --tag-fg: #8b2b0f;
-    --success-bg: #dff6e8;
-    --success-fg: #0a7f2e;
-    --glow-1: rgba(245, 151, 110, 0.35);
-    --glow-2: rgba(66, 191, 160, 0.25);
+  --tag-border: #ffd1bb;
+  --tag-fg: #8b2b0f;
+  --success-bg: #dff6e8;
+  --success-fg: #0a7f2e;
+  --danger: #d9342b;
+  --row-hover: rgba(0, 0, 0, 0.04);
+  --glow-1: rgba(245, 151, 110, 0.35);
+  --glow-2: rgba(66, 191, 160, 0.25);
     color: var(--fg);
     background-color: var(--bg);
   }

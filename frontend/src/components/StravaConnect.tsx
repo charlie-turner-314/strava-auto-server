@@ -53,97 +53,110 @@ export function StravaConnect() {
     : 'No events yet'
 
   return (
-    <div style={{ padding: '0.5rem', border: '1px solid var(--border)', borderRadius: 8, marginBottom: '1rem' }}>
-      <strong>Strava</strong>: {connected ? 'Connected' : 'Not connected'}
-      {connected && expiresAt ? <span> (token expires {expiresAt})</span> : null}
-      {!connected && (
-        <button onClick={connect} style={{ marginLeft: 12 }}>
-          Connect to Strava
-        </button>
-      )}
-      {connected && (
-        <button
-          onClick={async () => {
-            await disconnectStrava()
-            qc.invalidateQueries({ queryKey: ['strava-status'] })
-          }}
-          style={{ marginLeft: 12 }}
-        >
-          Disconnect
-        </button>
-      )}
-
-      <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px dashed var(--border)' }}>
-        <strong>Webhooks</strong>: {webhookActive ? 'Active' : 'Inactive'}
-        {webhook.data?.callback_url && (
-          <div style={{ marginTop: 4, fontSize: 12, color: 'var(--muted)' }}>
-            Callback: <code>{webhook.data.callback_url}</code>
+    <section className="panel panel--tight">
+      <div className="panel-header">
+        <div>
+          <div className="panel-title">Strava Connection</div>
+          <div className="panel-subtitle">
+            {connected ? 'Connected' : 'Not connected'}
+            {connected && expiresAt ? ` - token expires ${expiresAt}` : ''}
           </div>
-        )}
-        <div style={{ marginTop: 4, fontSize: 12, color: 'var(--muted)' }}>
-          Last event: {lastEventDisplay}
-          {webhook.data?.last_activity_id ? ` • Activity ${webhook.data.last_activity_id}` : ''}
-          {webhook.data?.last_event_aspect ? ` • ${webhook.data.last_event_aspect}` : ''}
         </div>
-        {webhook.data?.last_error && (
-          <div style={{ marginTop: 4, fontSize: 12, color: 'crimson' }}>
-            Last error: {webhook.data.last_error}
-          </div>
-        )}
-        <div style={{ marginTop: 6 }}>
-          {webhookActive ? (
-            <button
-              onClick={async () => {
-                await unsubscribeWebhook()
-                qc.invalidateQueries({ queryKey: ['webhook-status'] })
-              }}
-            >
-              Disable webhooks
+        <div className="panel-actions">
+          {!connected ? (
+            <button type="button" className="btn-primary" onClick={connect}>
+              Connect to Strava
             </button>
           ) : (
             <button
+              type="button"
               onClick={async () => {
-                await subscribeWebhook()
-                qc.invalidateQueries({ queryKey: ['webhook-status'] })
+                await disconnectStrava()
+                qc.invalidateQueries({ queryKey: ['strava-status'] })
               }}
             >
-              Enable webhooks
+              Disconnect
             </button>
-          )}
-          {!webhook.data?.verify_token_set && (
-            <span style={{ marginLeft: 8, fontSize: 12, color: 'crimson' }}>Missing verify token</span>
           )}
         </div>
       </div>
 
-      {metrics.data && (
-        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>
-          Requests: 15m {metrics.data.requests_15m}, 24h {metrics.data.requests_24h}
-          {metrics.data.errors_429_15m > 0 && <span> • 429s (15m): {metrics.data.errors_429_15m}</span>}
-          {metrics.data.cooldown_until > 0 && metrics.data.cooldown_until > Math.floor(Date.now() / 1000) && (
-            <span> • {metrics.data.cooldown_message || `Cooldown until ${new Date(metrics.data.cooldown_until * 1000).toLocaleTimeString()}`}</span>
+      <div className="panel-grid">
+        <div className="panel-box">
+          <div className="panel-box-title">
+            Webhooks <span className={`status-pill ${webhookActive ? 'ok' : 'warn'}`}>{webhookActive ? 'Active' : 'Inactive'}</span>
+          </div>
+          {webhook.data?.callback_url && (
+            <div className="panel-subtitle">
+              Callback: <code>{webhook.data.callback_url}</code>
+            </div>
+          )}
+          <div className="panel-subtitle">
+            Last event: {lastEventDisplay}
+            {webhook.data?.last_activity_id ? ` - Activity ${webhook.data.last_activity_id}` : ''}
+            {webhook.data?.last_event_aspect ? ` - ${webhook.data.last_event_aspect}` : ''}
+          </div>
+          {webhook.data?.last_error && (
+            <div className="panel-subtitle" style={{ color: 'var(--danger)' }}>
+              Last error: {webhook.data.last_error}
+            </div>
+          )}
+          <div className="panel-actions" style={{ marginTop: 8 }}>
+            {webhookActive ? (
+              <button
+                type="button"
+                onClick={async () => {
+                  await unsubscribeWebhook()
+                  qc.invalidateQueries({ queryKey: ['webhook-status'] })
+                }}
+              >
+                Disable webhooks
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={async () => {
+                  await subscribeWebhook()
+                  qc.invalidateQueries({ queryKey: ['webhook-status'] })
+                }}
+              >
+                Enable webhooks
+              </button>
+            )}
+            {!webhook.data?.verify_token_set && (
+              <span className="panel-subtitle" style={{ color: 'var(--danger)' }}>Missing verify token</span>
+            )}
+          </div>
+        </div>
+
+        <div className="panel-box">
+          <div className="panel-box-title">Rate Limits</div>
+          {metrics.data ? (
+            <div className="stack">
+              <div className="panel-subtitle">
+                Requests: 15m {metrics.data.requests_15m}, 24h {metrics.data.requests_24h}
+              </div>
+              {metrics.data.errors_429_15m > 0 && (
+                <div className="panel-subtitle">429s (15m): {metrics.data.errors_429_15m}</div>
+              )}
+              {metrics.data.cooldown_until > 0 && metrics.data.cooldown_until > Math.floor(Date.now() / 1000) && (
+                <div className="panel-subtitle">
+                  {metrics.data.cooldown_message || `Cooldown until ${new Date(metrics.data.cooldown_until * 1000).toLocaleTimeString()}`}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="panel-subtitle">Metrics loading…</div>
           )}
         </div>
-      )}
+      </div>
 
       {toast && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: 16,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: 'var(--notice-bg, #333)',
-            color: 'var(--notice-fg, #fff)',
-            padding: '8px 12px',
-            borderRadius: 8,
-            boxShadow: '0 2px 10px rgba(0,0,0,0.2)',
-          }}
-        >
+        <div className="toast">
           {toast}
         </div>
       )}
-    </div>
+    </section>
   )
 }
 
