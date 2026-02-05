@@ -17,6 +17,7 @@ class TestMainEndpoints(unittest.TestCase):
         os.environ['DATABASE_URL'] = f'sqlite:///{self.db_path}'
         os.environ['APP_ENV'] = 'prod'
         os.environ['APP_AUTH_SECRET'] = 'test-secret'
+        os.environ['APP_COOKIE_SECURE'] = '0'
         os.environ['STRAVA_CLIENT_ID'] = '12345'
         os.environ['STRAVA_CLIENT_SECRET'] = 'secret'
         os.environ['STRAVA_REDIRECT_URI'] = 'http://example/cb'

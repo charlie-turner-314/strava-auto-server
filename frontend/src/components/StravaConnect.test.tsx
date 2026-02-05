@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -59,7 +59,10 @@ afterAll(() => server.close())
 
 it('shows webhook status', async () => {
   renderWithClient(<StravaConnect />)
-  expect(await screen.findByText(/Webhooks/i)).toBeTruthy()
-  expect(await screen.findByText(/Active/i)).toBeTruthy()
-  expect(screen.getByText(/Last event/i)).toBeTruthy()
+  const title = await screen.findByText(/Webhooks/i, { selector: '.panel-box-title' })
+  const panel = title.closest('.panel-box')
+  expect(panel).toBeTruthy()
+  const scoped = within(panel as HTMLElement)
+  expect(scoped.getByText(/Active/i)).toBeTruthy()
+  expect(scoped.getByText(/Last event/i)).toBeTruthy()
 })

@@ -1,10 +1,12 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 os.environ['DISABLE_SCHEDULER'] = '1'
 
 from fastapi.testclient import TestClient  # type: ignore
+from sqlalchemy import text as sql_text
 
 
 class TestAutomationsAPI(unittest.TestCase):
@@ -12,7 +14,9 @@ class TestAutomationsAPI(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.db_path = os.path.join(self.tmpdir.name, 'test.db')
         os.environ['DATABASE_URL'] = f'sqlite:///{self.db_path}'
-        os.environ['APP_ENV'] = 'test'
+        os.environ['APP_ENV'] = 'prod'
+        os.environ['APP_AUTH_SECRET'] = 'test-secret'
+        os.environ['APP_COOKIE_SECURE'] = '0'
         # Reset engine before importing app
         from api import db  # type: ignore
         db._engine = None  # type: ignore[attr-defined]
@@ -32,7 +36,34 @@ class TestAutomationsAPI(unittest.TestCase):
             self.client.close()
         self.tmpdir.cleanup()
 
+    def _login(self, athlete_id: int = 42) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.main.engine.begin() as conn:
+            conn.execute(
+                sql_text(
+                    """
+                    INSERT INTO users (athlete_id, firstname, lastname, username, created_at, updated_at)
+                    VALUES (:aid, :fn, :ln, :un, :now, :now)
+                    ON CONFLICT(athlete_id) DO UPDATE SET
+                      firstname = excluded.firstname,
+                      lastname = excluded.lastname,
+                      username = excluded.username,
+                      updated_at = excluded.updated_at
+                    """
+                ),
+                {
+                    "aid": int(athlete_id),
+                    "fn": "Test",
+                    "ln": "User",
+                    "un": "tester",
+                    "now": now,
+                },
+            )
+        token, _ = self.main._issue_session(int(athlete_id))
+        self.client.cookies.set(self.main.COOKIE_NAME, token)
+
     def test_create_list_toggle_delete(self):
+        self._login()
         # Create
         payload = {
             "name": "Test Auto",
