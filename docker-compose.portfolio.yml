@@ -1,0 +1,22 @@
+# Opt-in overlay: docker compose -f docker-compose.yml -f docker-compose.portfolio.yml ...
+# Portfolio stays on its existing immutable release; only its public origin changes.
+services:
+  api:
+    environment:
+      FRONTEND_BASE_URL: "https://${DOMAIN}/strava"
+  frontend:
+    build:
+      args:
+        VITE_BASE_PATH: /strava/
+        VITE_API_BASE: /strava
+  caddy:
+    volumes:
+      - ./Caddyfile.portfolio:/etc/caddy/Caddyfile:ro
+    networks:
+      - default
+      - portfolio
+
+networks:
+  portfolio:
+    external: true
+    name: ${PORTFOLIO_NETWORK:-personal-portfolio_default}
