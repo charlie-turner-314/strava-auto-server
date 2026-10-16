@@ -42,7 +42,10 @@ with tempfile.TemporaryDirectory(prefix='strava-routing-') as tmp:
     compose=['docker','compose','-p','strava-routing-'+uuid.uuid4().hex[:8],'-f',str(config)]
     def run(*args,**kwargs): return subprocess.check_output(compose+list(args),text=True,**kwargs)
     try:
-        run('up','-d','--build','--wait')
+        subprocess.run(['docker','build','--build-arg','VITE_BASE_PATH=/strava/',
+            '--build-arg','VITE_API_BASE=/strava','-t',services['frontend']['image'],
+            str(ROOT/'frontend')],check=True)
+        run('up','-d','--no-build','--wait')
         base='http://'+run('port','caddy','80').strip()
         for attempt in range(40):
             try:

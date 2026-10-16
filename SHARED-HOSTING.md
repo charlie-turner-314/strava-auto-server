@@ -34,7 +34,8 @@ Before enabling it:
    a database migration or application-version upgrade. Public HTTPS is now the
    canonical login origin; old LAN cookies do not transfer to the new hostname.
 5. Build and test before replacing services. Keep Caddy's existing certificate
-   volumes. Deploy frontend and API, then switch Caddy. Never use `down -v`.
+   volumes and pin `EDGE_CADDY_IMAGE` to the existing Caddy image (a retained
+   local tag is sufficient) to avoid an unrelated proxy upgrade. Deploy frontend and API, then switch Caddy. Never use `down -v`.
 
 Run `python3 scripts/test-shared-routing.py` with Docker available to test actual
 Caddy routing against isolated stub APIs and a production Strava frontend build.
