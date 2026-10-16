@@ -85,6 +85,31 @@ class TestMainEndpoints(unittest.TestCase):
         finally:
             self.main.StravaClient.exchange_code_for_token = orig_exchange  # type: ignore[attr-defined]
 
+    def test_browser_oauth_returns_to_strava_subpath(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, patch
+
+        for success in (True, False):
+            init = self.client.get('/api/auth/strava/init')
+            auth_url = init.json()['auth_url']
+            query = parse_qs(urlparse(auth_url).query)
+            self.assertEqual(query['redirect_uri'], ['http://example/cb'])
+            exchange = AsyncMock(return_value=(SimpleNamespace(athlete_id=42, scope='read'), {'id': 42}))
+            if not success:
+                exchange.side_effect = RuntimeError('simulated OAuth error')
+            with patch.object(self.main, 'FRONTEND_BASE_URL', 'https://example.com/strava'), patch.object(
+                self.main.StravaClient, 'exchange_code_for_token', exchange
+            ):
+                response = self.client.get(
+                    '/api/auth/strava/callback',
+                    params={'code': 'test-code', 'state': query['state'][0]},
+                    headers={'accept': 'text/html', 'user-agent': 'Browser'},
+                    follow_redirects=False,
+                )
+            self.assertEqual(response.status_code, 302)
+            expected = 'https://example.com/strava/?connected=' + ('1' if success else '0&error=oauth')
+            self.assertEqual(response.headers['location'], expected)
+
     def test_root_and_healthz(self):
         r = self.client.get('/')
         self.assertEqual(r.status_code, 200)

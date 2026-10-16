@@ -53,3 +53,10 @@ jobs:
 
       - name: Run frontend unit tests
         run: npm run test
+
+  shared-routing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise shared-host proxy and production frontend
+        run: python3 scripts/test-shared-routing.py

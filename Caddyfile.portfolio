@@ -1,0 +1,24 @@
+{$DOMAIN} {
+    encode gzip
+
+    # These externally registered endpoints keep their original URLs.
+    @strava_legacy path /api/webhooks/strava /api/auth/strava/* /healthz
+    handle @strava_legacy {
+        reverse_proxy api:8000
+    }
+
+    redir /strava /strava/ 308
+    handle_path /strava/* {
+        # nginx forwards /api/* to Strava and serves its built frontend.
+        reverse_proxy frontend:80
+    }
+
+    handle /api/health {
+        reverse_proxy personal-portfolio-backend:8000
+    }
+
+    # Portfolio owns the remaining routes, including /api/auth/*.
+    handle {
+        reverse_proxy personal-portfolio-app:3000
+    }
+}
